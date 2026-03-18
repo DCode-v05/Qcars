@@ -73,7 +73,7 @@ MOTOR_CH         = np.array([THROTTLE_CH, STEERING_CH], dtype=np.uint32)
 ENC_CH           = np.array([ENCODER_CH],               dtype=np.uint32)
 NUM_MEASUREMENTS = 384
 RANGING_MODE     = 0
-INTERP_MODE      = 0
+INTERP_MODE      = 1
 LOOP_HZ          = 8
 LOOP_PERIOD      = 1.0 / LOOP_HZ
 
@@ -443,19 +443,26 @@ def angle_diff(a, b):
 def arc_min_dist(distances, angles_rad, center_deg, half_deg):
     cr   = math.radians(center_deg)
     hr   = math.radians(half_deg)
-    mask = np.array([abs(angle_diff(float(a), cr)) <= hr for a in angles_rad])
-    valid = (distances > 0.05) & mask
+    mask = np.array(
+        [abs(angle_diff(float(a), cr)) <= hr for a in angles_rad],
+        dtype=bool                                        
+    )    valid = (distances > 0.05) & mask
     return float(distances[valid].min()) if valid.sum() > 0 else None
 
 
 def arc_blocked(distances, angles_rad, center_deg, half_deg, thresh, frac):
     cr   = math.radians(center_deg)
     hr   = math.radians(half_deg)
-    mask = np.array([abs(angle_diff(float(a), cr)) <= hr for a in angles_rad])
+    mask = np.array(
+        [abs(angle_diff(float(a), cr)) <= hr for a in angles_rad],
+        dtype=bool
+    )
+    distances = np.asarray(distances, dtype=np.float64)
     valid = (distances > 0.05) & mask
     if valid.sum() == 0:
         return False
     return (distances[valid] <= thresh).sum() / valid.sum() >= frac
+
 
 def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     cr   = math.radians(travel_center_deg)
@@ -691,8 +698,8 @@ def main():
             # ── LiDAR read ────────────────────────────────────
             if HARDWARE and lidar:
                 lidar.read()
-                distances  = lidar.distances.flatten()
-                angles_rad = lidar.angles.flatten()
+                distances  = lidar.distances.flatten().copy()
+                angles_rad = lidar.angles.flatten().copy()
             else:
                 distances, angles_rad = demo_scan()
 

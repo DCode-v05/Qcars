@@ -59,7 +59,7 @@ INTERP_MODE       = 0
 # Step 3: paste that angle into FRONT_CENTER_DEG below
 # REAR_CENTER_DEG is auto-computed as FRONT + 180 deg
 # ══════════════════════════════════════════════════════════════
-FRONT_CENTER_DEG  = 0.0     # <-- paste value from lidar_diag.py here
+FRONT_CENTER_DEG  = 180.0     # <-- paste value from lidar_diag.py here
 REAR_CENTER_DEG   = (FRONT_CENTER_DEG + 180.0) % 360.0
 ARC_HALF_DEG      = 30.0    # half-width of detection cone (deg)
 

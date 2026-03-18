@@ -42,7 +42,7 @@ from pygame import gfxdraw
 # ══════════════════════════════════════════════════════════════
 #  CALIBRATION  ← paste your value from lidar_diag.py here
 # ══════════════════════════════════════════════════════════════
-FRONT_CENTER_DEG = 0.0          # angle (deg) that points to QCar nose
+FRONT_CENTER_DEG = 180.0          # angle (deg) that points to QCar nose
 REAR_CENTER_DEG  = (FRONT_CENTER_DEG + 180.0) % 360.0
 
 # ══════════════════════════════════════════════════════════════
