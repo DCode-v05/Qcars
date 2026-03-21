@@ -47,10 +47,10 @@ from dashboard        import Dashboard
 #  MISSION PARAMETERS  —  edit here before each run
 # ═════════════════════════════════════════════════════════════════════════════
 
-GOAL_DISTANCE_M  = 2.0     # metres forward to drive
+GOAL_DISTANCE_M  = 15.0    # metres — large enough for 30s of autonomous driving
 MAX_THROTTLE     = 0.10    # safety ceiling — increase only after testing
 DASHBOARD_PORT   = 5000
-RUN_TIMEOUT_S    = 60.0    # hard timeout
+RUN_TIMEOUT_S    = 35.0    # hard timeout — car runs for ~30s then stops safely
 
 
 # ═════════════════════════════════════════════════════════════════════════════
