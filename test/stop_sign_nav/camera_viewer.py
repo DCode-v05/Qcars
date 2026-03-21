@@ -343,7 +343,7 @@ def main():
     try:
         ip = socket.gethostbyname(socket.gethostname())
     except Exception:
-        ip = '<jetson-ip>'
+        ip = '10.1.77.73'
 
     print("═" * 55)
     print("  QCar 2 — Live Camera Viewer")

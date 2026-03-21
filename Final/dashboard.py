@@ -1,6 +1,6 @@
 """
 dashboard.py  —  Live web dashboard for QCar 2
-Flask server at http://<jetson-ip>:5000
+Flask server at http://10.1.77.73:5000
 
 CRITICAL FIX: All image rendering runs in a background thread at max 5Hz.
 Dashboard.update() is now instant (~0ms) — never blocks the main control loop.
@@ -439,7 +439,7 @@ class Dashboard:
         try:
             ip = socket.gethostbyname(socket.gethostname())
         except Exception:
-            ip = '<jetson-ip>'
+            ip = '10.1.77.73'
         print(f"\n  Dashboard: http://{ip}:{self.port}")
         print("  Render thread: started (5Hz)")
         print("  Open in your PC browser.\n")

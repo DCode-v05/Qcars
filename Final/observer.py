@@ -162,13 +162,23 @@ def main():
             # ── 3. Pose estimation (single call: encoder + gyro) ──────────
             pose = estimator.update(data, dt)
 
-            # ── 4. Obstacle detection (LiDAR + YOLO + depth) ─────────────
+            # ── 4. Compute heading to goal (for path planner bias) ───────
+            dx = navigator._goal_x - pose[0]
+            dy = navigator._goal_y - pose[1]
+            goal_heading_world = float(np.arctan2(dy, dx))
+            # Convert to body frame: how far the goal is from where we're facing
+            goal_heading_body = goal_heading_world - pose[2]
+            # Normalize to [0, 2π] for the LiDAR angle convention
+            goal_heading_lidar = goal_heading_body % (2 * np.pi)
+            detector.set_goal_heading(goal_heading_lidar)
+
+            # ── 5. Obstacle detection (LiDAR + YOLO + depth + path plan) ─
             detection = detector.detect(data)
 
-            # ── 5. Navigation ─────────────────────────────────────────────
+            # ── 6. Navigation ─────────────────────────────────────────────
             nav_result = navigator.update(pose, dt)
 
-            # ── 6. State machine ──────────────────────────────────────────
+            # ── 7. State machine ──────────────────────────────────────────
             sm_result = sm.update(detection, nav_result, data, dt)
             throttle  = sm_result['throttle']
             steering  = sm_result['steering']
@@ -214,11 +224,16 @@ def main():
                 otype       = detection['obstacle_type']
                 rear_m      = detection.get('rear_min_m', 99.0)
                 rear_str    = f"{rear_m:.1f}" if rear_m < 90 else "---"
+                gap_w       = detection.get('best_gap_width_deg', 0)
+                path_ang    = detection.get('best_path_angle', 0)
+                path_ang_n  = path_ang if path_ang <= np.pi else path_ang - 2*np.pi
+                fwd_str     = "FWD" if detection.get('drive_forward', True) else "REV"
                 print(
                     f"[{elapsed:5.1f}s] {sm_state:<11}  "
                     f"x={x:+.2f} y={y:+.2f} θ={np.degrees(theta):+.0f}°  "
                     f"goal={dist_rem:.2f}m  "
-                    f"zone={zone:<5} beh={beh:<12} type={otype:<6}  "
+                    f"zone={zone:<5} beh={beh:<12}  "
+                    f"path={fwd_str} {np.degrees(path_ang_n):+.0f}° gap={gap_w:.0f}°  "
                     f"rear={rear_str}m  "
                     f"thr={throttle:+.3f} str={steering:+.2f}  "
                     f"dt={avg_dt_ms:.0f}ms"

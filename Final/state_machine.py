@@ -1,20 +1,20 @@
 """
 state_machine.py  —  Decision brain for QCar 2
 
-States:
-  IDLE          → waiting, motors off
-  NAVIGATING    → driving to goal at cruise speed
-  AVOIDING      → static obstacle, steer around it at reduced speed
-  WAITING       → person/moving obstacle, hold position
-  STOPPED       → too close (<0.4m) AND rear blocked, full halt
-  REVERSING     → front blocked + rear clear, back up immediately
-  ARRIVED       → reached goal, stop permanently
+Uses LiDAR path planner output to decide WHAT to do:
+  - Path planner says "go forward, steer X" → NAVIGATING/AVOIDING with that steer
+  - Path planner says "reverse, steer X"    → REVERSING with that steer
+  - Path planner says "no path"             → STOPPED
+  - YOLO sees person                        → WAITING
 
-KEY LOGIC:
-  Front blocked + rear clear  → REVERSE immediately (no delay)
-  Front blocked + rear blocked → STOP (wait for clearance)
-  Front clear                 → NAVIGATE / AVOID as normal
-  Avoidance steering is proportional to proximity (softer at range)
+States:
+  IDLE          → motors off
+  NAVIGATING    → driving toward goal, path clear
+  AVOIDING      → obstacle in warn zone, steering around via path planner
+  WAITING       → person detected, hold position
+  STOPPED       → no path found or rear blocked, full halt
+  REVERSING     → front blocked, best gap is behind, backing up
+  ARRIVED       → reached goal
 """
 import numpy as np
 from hal.utilities.control import PID
@@ -33,8 +33,8 @@ from lights import (
 class StateMachineConfig:
     # Speed
     V_REF_NAVIGATE  = 0.2    # m/s cruise speed
-    V_REF_AVOID     = 0.1    # m/s during avoidance
-    V_REF_REVERSE   = 0.1    # m/s during reverse
+    V_REF_AVOID     = 0.12   # m/s during obstacle avoidance
+    V_REF_REVERSE   = 0.10   # m/s during reverse
     MAX_THROTTLE    = 0.10   # absolute throttle ceiling
     MAX_STEERING    = np.pi / 6   # ±30°
 
@@ -43,15 +43,14 @@ class StateMachineConfig:
     K_SPEED_I = 1.0
     K_SPEED_D = 0.0
 
-    # Avoidance steering — proportional to proximity
-    AVOID_STEER_MIN  = 0.15   # steer gain at warn distance (1.5m)
-    AVOID_STEER_MAX  = 0.45   # steer gain at stop distance (0.4m)
-
     # Waiting timeout
-    WAIT_TIMEOUT_S  = 8.0
+    WAIT_TIMEOUT_S     = 8.0
 
-    # Reverse duration: back up for N seconds then re-evaluate
-    REVERSE_DURATION_S = 1.2
+    # Reverse: max duration before re-evaluating
+    REVERSE_MAX_S      = 2.0
+
+    # Stopped: if stuck for this long, try reverse anyway
+    STUCK_TIMEOUT_S    = 3.0
 
 
 class StateMachine:
@@ -65,33 +64,37 @@ class StateMachine:
             Kd      = config.K_SPEED_D,
             uLimits = (-config.MAX_THROTTLE, config.MAX_THROTTLE),
         )
-        self._wait_timer    = 0.0
-        self._reverse_timer = 0.0
-        self._reverse_side  = 'left'
+        self._wait_timer     = 0.0
+        self._reverse_timer  = 0.0
+        self._stuck_timer    = 0.0
+        self._path_steer     = 0.0   # from path planner
         self._battery_warned = False
 
     def reset(self):
         self.state = STATE_NAVIGATING
         self._speed_pid.reset()
-        self._wait_timer    = 0.0
-        self._reverse_timer = 0.0
+        self._wait_timer     = 0.0
+        self._reverse_timer  = 0.0
+        self._stuck_timer    = 0.0
         self._battery_warned = False
         print(f"[StateMachine] Reset → {self.state}")
 
     def update(self, detection: dict, nav_result: dict,
                sensor_data: dict, dt: float) -> dict:
 
-        behaviour   = detection['behaviour']
-        avoid_side  = detection['avoid_side']
-        arrived     = nav_result['arrived']
-        nav_steer   = nav_result['steering_cmd']
-        front_dist  = detection['distance_m']
+        behaviour     = detection['behaviour']
+        arrived       = nav_result['arrived']
+        nav_steer     = nav_result['steering_cmd']
+        front_dist    = detection['distance_m']
 
-        # Rear awareness from LiDAR
+        # Path planner outputs
+        has_path      = detection.get('has_path', True)
+        path_steer    = detection.get('path_steer', 0.0)
+        drive_forward = detection.get('drive_forward', True)
         rear_clear    = detection.get('rear_clear', True)
         front_blocked = detection.get('front_blocked', False)
 
-        # Speed from motor tachometer
+        # Speed from motor tachometer (corrected conversion)
         current_speed = float(sensor_data['motor_speed']) * TACH_TO_MPS
 
         # Battery check
@@ -112,33 +115,24 @@ class StateMachine:
         if self.state == STATE_ARRIVED:
             pass  # terminal
 
+        elif arrived:
+            self.state = STATE_ARRIVED
+
         elif self.state == STATE_REVERSING:
+            # Continue reversing until timer expires or rear becomes blocked
             self._reverse_timer += dt
-            if self._reverse_timer >= self.cfg.REVERSE_DURATION_S:
+            if self._reverse_timer >= self.cfg.REVERSE_MAX_S:
                 print(f"  [FSM] Reverse done ({self._reverse_timer:.1f}s) → NAVIGATING")
                 self._reverse_timer = 0.0
+                self._stuck_timer   = 0.0
                 self.state = STATE_NAVIGATING
             elif not rear_clear:
-                # Rear became blocked while reversing — stop
                 print(f"  [FSM] Rear blocked during reverse → STOPPED")
                 self._reverse_timer = 0.0
                 self.state = STATE_STOPPED
 
-        elif arrived:
-            self.state = STATE_ARRIVED
-
-        elif behaviour == BEHAVIOUR_EMERGENCY_STOP:
-            # Front too close — decide: reverse or stop
-            if rear_clear:
-                if self.state != STATE_REVERSING:
-                    print(f"  [FSM] Front STOP zone + rear clear → REVERSING")
-                    self._reverse_timer = 0.0
-                    self._reverse_side  = avoid_side
-                self.state = STATE_REVERSING
-            else:
-                self.state = STATE_STOPPED
-
         elif behaviour == BEHAVIOUR_WAIT:
+            # Person/moving obstacle — hold position
             self._wait_timer += dt
             if self.state != STATE_WAITING:
                 self.state = STATE_WAITING
@@ -149,54 +143,80 @@ class StateMachine:
                 self._wait_timer = 0.0
                 self.state = STATE_NAVIGATING
 
+        elif behaviour == BEHAVIOUR_EMERGENCY_STOP:
+            # Front too close — use path planner to decide
+            if has_path and not drive_forward and rear_clear:
+                # Best gap is behind us — reverse
+                if self.state != STATE_REVERSING:
+                    print(f"  [FSM] Front STOP + best path behind → REVERSING")
+                    self._reverse_timer = 0.0
+                    self._path_steer = path_steer
+                self.state = STATE_REVERSING
+            elif has_path and drive_forward:
+                # Path planner found a forward escape route — try avoiding
+                self.state = STATE_AVOIDING
+                self._path_steer = path_steer
+            elif rear_clear:
+                # No great path but rear is clear — just back up
+                if self.state != STATE_REVERSING:
+                    print(f"  [FSM] Front STOP + rear clear → REVERSING (fallback)")
+                    self._reverse_timer = 0.0
+                    self._path_steer = 0.0
+                self.state = STATE_REVERSING
+            else:
+                # Truly stuck — front and rear blocked
+                self._stuck_timer += dt
+                if self._stuck_timer >= self.cfg.STUCK_TIMEOUT_S and rear_clear:
+                    print(f"  [FSM] Stuck {self._stuck_timer:.1f}s → trying REVERSE")
+                    self._stuck_timer = 0.0
+                    self._reverse_timer = 0.0
+                    self._path_steer = 0.0
+                    self.state = STATE_REVERSING
+                else:
+                    self.state = STATE_STOPPED
+
         elif behaviour == BEHAVIOUR_AVOID:
+            # Obstacle in warn zone — steer using path planner
             self.state = STATE_AVOIDING
+            self._path_steer = path_steer
+            self._stuck_timer = 0.0
 
         elif behaviour == BEHAVIOUR_NAVIGATE:
+            # Path clear — normal driving
             if self.state not in (STATE_NAVIGATING, STATE_ARRIVED):
                 print(f"  [FSM] Path clear → NAVIGATING")
             self.state = STATE_NAVIGATING
-            self._wait_timer = 0.0
+            self._wait_timer  = 0.0
+            self._stuck_timer = 0.0
 
         # ── Compute throttle + steering ───────────────────────────────────
+
+        v_ref    = 0.0
+        throttle = 0.0
+        steering = 0.0
 
         if self.state == STATE_NAVIGATING:
             v_ref    = self.cfg.V_REF_NAVIGATE
             throttle = self._speed_pid.update(r=v_ref, y=current_speed, dt=dt)
+            # Use navigator heading PID when path is clear
             steering = nav_steer
 
         elif self.state == STATE_AVOIDING:
             v_ref    = self.cfg.V_REF_AVOID
             throttle = self._speed_pid.update(r=v_ref, y=current_speed, dt=dt)
-
-            # Proportional avoidance: steer harder when closer
-            proximity = np.clip(
-                (1.5 - front_dist) / (1.5 - 0.4), 0.0, 1.0
-            )
-            avoid_gain = (self.cfg.AVOID_STEER_MIN +
-                          proximity * (self.cfg.AVOID_STEER_MAX - self.cfg.AVOID_STEER_MIN))
-            avoid_offset = avoid_gain * (1.0 if avoid_side == 'left' else -1.0)
-            steering = float(np.clip(
-                nav_steer + avoid_offset,
-                -self.cfg.MAX_STEERING, self.cfg.MAX_STEERING
-            ))
+            # Use path planner steering — it already points toward the best gap
+            steering = self._path_steer
 
         elif self.state == STATE_REVERSING:
             v_ref    = -self.cfg.V_REF_REVERSE
             throttle = self._speed_pid.update(r=v_ref, y=current_speed, dt=dt)
-            # Steer opposite while reversing
-            reverse_steer = -0.3 * (1.0 if self._reverse_side == 'left' else -1.0)
-            steering = float(np.clip(reverse_steer,
-                                     -self.cfg.MAX_STEERING, self.cfg.MAX_STEERING))
+            # Path planner already computed reverse steering
+            steering = self._path_steer
 
         elif self.state in (STATE_WAITING, STATE_STOPPED, STATE_IDLE, STATE_ARRIVED):
             throttle = 0.0
             steering = 0.0
             self._speed_pid.reset()
-
-        else:
-            throttle = 0.0
-            steering = 0.0
 
         return {
             'state':      self.state,
@@ -204,7 +224,7 @@ class StateMachine:
                                                     self.cfg.MAX_THROTTLE)),
             'steering':   float(np.clip(steering, -self.cfg.MAX_STEERING,
                                                     self.cfg.MAX_STEERING)),
-            'v_ref':      v_ref if self.state in (STATE_NAVIGATING, STATE_AVOIDING, STATE_REVERSING) else 0.0,
+            'v_ref':      v_ref,
             'speed_mps':  current_speed,
             'battery_ok': battery_ok,
         }
