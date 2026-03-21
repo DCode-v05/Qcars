@@ -1,13 +1,10 @@
 """
 dashboard.py  —  Live web dashboard for QCar 2
 Flask server at http://<jetson-ip>:5000
-6 panels: camera+YOLO, LiDAR polar, depth chart, obstacle status, pose, LEDs+timing.
-Runs in background thread — never blocks the main sensor loop.
-Call Dashboard.start() once, then Dashboard.update() every tick.
 
-Fixes applied:
-  - Matplotlib figures are created once and reused (no leak, ~5ms faster per tick)
-  - REVERSING state added to CSS
+CRITICAL FIX: All image rendering runs in a background thread at max 5Hz.
+Dashboard.update() is now instant (~0ms) — never blocks the main control loop.
+Depth chart uses OpenCV instead of matplotlib (~1ms vs ~200ms).
 """
 import io
 import threading
@@ -17,7 +14,7 @@ import cv2
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from flask import Flask, Response, render_template_string, jsonify
+from flask import Flask, Response, render_template_string
 
 from obstacle_detector import (
     ZONE_CLEAR, ZONE_WARN, ZONE_STOP,
@@ -38,11 +35,14 @@ class _State:
         self.leds        = [0]*8
         self.timing      = {}
         self.sm_state    = 'IDLE'
+        self._raw_frame  = None     # raw BGR for render thread
         self._cam_jpeg   = b''
         self._lidar_png  = b''
         self._depth_png  = b''
+        self._dirty      = False    # new data available for rendering
 
-    def update(self, detection, pose, speed_mps, dist_goal, leds, timing, sm_state):
+    def push(self, detection, pose, speed_mps, dist_goal, leds, timing, sm_state):
+        """Called from main loop — instant, no rendering."""
         with self._lock:
             self.detection  = detection
             self.pose       = pose
@@ -51,6 +51,17 @@ class _State:
             self.leds       = leds
             self.timing     = timing
             self.sm_state   = sm_state
+            self._raw_frame = detection.get('annotated_frame', None)
+            self._dirty     = True
+
+    def pop_for_render(self):
+        """Called from render thread — grabs snapshot and clears dirty flag."""
+        with self._lock:
+            if not self._dirty:
+                return None
+            self._dirty = False
+            return (dict(self.detection), self._raw_frame,
+                    self.pose.copy(), self.sm_state)
 
     def set_images(self, cam_jpeg, lidar_png, depth_png):
         with self._lock:
@@ -75,14 +86,80 @@ class _State:
 _s = _State()
 
 
-# ── Persistent figure renderers ──────────────────────────────────────────────
+# ── Fast image generators ────────────────────────────────────────────────────
+
+def _cam_jpeg(frame):
+    """Encode BGR frame to JPEG. ~5ms."""
+    if frame is None:
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(frame, 'No frame', (220, 240),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (60,60,60), 2)
+    _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return buf.tobytes()
+
+
+def _depth_cv2(det):
+    """
+    Depth clearance bar chart using OpenCV — replaces matplotlib.
+    ~1ms instead of ~200ms.
+    """
+    W, H = 280, 180
+    img = np.full((H, W, 3), (22, 27, 13), dtype=np.uint8)  # #0d1117 BGR
+
+    lm = det.get('left_clear_m',  99.0)
+    rm = det.get('right_clear_m', 99.0)
+    gs = det.get('gap_side',      'left')
+    gw = det.get('gap_width_px',  0)
+
+    max_d = 3.0
+    bar_w = 55
+    max_h = H - 50
+    lh = int((min(lm, max_d) / max_d) * max_h)
+    rh = int((min(rm, max_d) / max_d) * max_h)
+
+    # Colours (BGR): green=(80,185,63), blue=(253,139,56), yellow=(65,179,227)
+    lcolor = (80, 185, 63) if gs == 'left' else (253, 139, 56)
+    rcolor = (80, 185, 63) if gs == 'right' else (65, 179, 227)
+
+    # Left bar
+    x1l = 50
+    cv2.rectangle(img, (x1l, H-25-lh), (x1l+bar_w, H-25), lcolor, -1)
+    # Right bar
+    x1r = W - 50 - bar_w
+    cv2.rectangle(img, (x1r, H-25-rh), (x1r+bar_w, H-25), rcolor, -1)
+
+    # Labels
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    grey = (142, 149, 158)
+    white = (201, 209, 217)
+    cv2.putText(img, 'Left', (x1l+5, H-8), font, 0.38, grey, 1)
+    cv2.putText(img, 'Right', (x1r+2, H-8), font, 0.38, grey, 1)
+
+    lt = f'{lm:.1f}m' if lm < 90 else '---'
+    rt = f'{rm:.1f}m' if rm < 90 else '---'
+    cv2.putText(img, lt, (x1l+5, H-30-lh), font, 0.38, white, 1)
+    cv2.putText(img, rt, (x1r+5, H-30-rh), font, 0.38, white, 1)
+
+    # Title
+    title = f'Gap: {gs.upper()}  {gw}px'
+    cv2.putText(img, title, (10, 16), font, 0.42, white, 1)
+
+    # Scale marks
+    for i, label in enumerate(['0m', '1m', '2m', '3m']):
+        y = H - 25 - int((i / 3.0) * max_h)
+        cv2.line(img, (40, y), (W-40, y), (33, 38, 48), 1)
+        cv2.putText(img, label, (5, y+4), font, 0.3, grey, 1)
+
+    _, buf = cv2.imencode('.png', img)
+    return buf.tobytes()
+
 
 class _LidarRenderer:
     """Reusable polar plot for LiDAR scans. Figure created once."""
 
     def __init__(self, max_r=4.0):
         self.max_r = max_r
-        self._fig = plt.figure(figsize=(4, 4), facecolor='#0d1117')
+        self._fig = plt.figure(figsize=(3.5, 3.5), facecolor='#0d1117')
         self._ax  = self._fig.add_subplot(111, projection='polar')
         self._setup_axes()
 
@@ -118,6 +195,10 @@ class _LidarRenderer:
             if (wm & clip).sum(): ax.scatter(a_v[wm&clip], d_v[wm&clip], s=8, c='#e3b341', alpha=0.9, linewidths=0)
             if (sm & clip).sum(): ax.scatter(a_v[sm&clip], d_v[sm&clip], s=12,c='#f85149', alpha=1.0, linewidths=0)
 
+            # Also show rear points (dimmer)
+            rear = ~ins & clip
+            if rear.sum(): ax.scatter(a_v[rear], d_v[rear], s=2, c='#484f58', alpha=0.4, linewidths=0)
+
         ax.fill_between(np.linspace(-fha, fha, 60), 0, max_r, color='#e3b341', alpha=0.05)
         ring = np.linspace(0, 2*np.pi, 200)
         ax.plot(ring, [1.5]*200, '--', c='#e3b341', lw=0.7, alpha=0.5)
@@ -129,58 +210,9 @@ class _LidarRenderer:
         plt.tight_layout(pad=0.1)
 
         buf = io.BytesIO()
-        self._fig.savefig(buf, format='png', dpi=90, facecolor='#0d1117', bbox_inches='tight')
+        self._fig.savefig(buf, format='png', dpi=80, facecolor='#0d1117', bbox_inches='tight')
         buf.seek(0)
         return buf.read()
-
-
-class _DepthRenderer:
-    """Reusable bar chart for depth clearance. Figure created once."""
-
-    def __init__(self):
-        self._fig, self._ax = plt.subplots(figsize=(3, 2), facecolor='#0d1117')
-
-    def render(self, det) -> bytes:
-        ax = self._ax
-        ax.cla()
-        ax.set_facecolor('#161b22')
-
-        lm = det.get('left_clear_m',  99.0)
-        rm = det.get('right_clear_m', 99.0)
-        gs = det.get('gap_side',      'left')
-        gw = det.get('gap_width_px',  0)
-        max_d = 3.0
-        lv = min(lm, max_d) / max_d
-        rv = min(rm, max_d) / max_d
-        bars = ax.bar(['Left', 'Right'], [lv, rv],
-                      color=['#388bfd', '#e3b341'], alpha=0.85, width=0.5)
-        bars[0 if gs=='left' else 1].set_color('#3fb950')
-        ax.set_ylim(0, 1.15)
-        ax.set_yticks([0, 0.33, 0.67, 1.0])
-        ax.set_yticklabels(['0m','1m','2m','3m'], color='#484f58', fontsize=7)
-        ax.tick_params(colors='#484f58', labelsize=8)
-        ax.set_title(f'Clear space → {gs.upper()}  gap:{gw}px',
-                     color='#c9d1d9', fontsize=8, pad=3)
-        ax.text(0, lv+0.04, f'{lm:.1f}m' if lm<90 else '—', ha='center', color='#c9d1d9', fontsize=8)
-        ax.text(1, rv+0.04, f'{rm:.1f}m' if rm<90 else '—', ha='center', color='#c9d1d9', fontsize=8)
-        for sp in ax.spines.values(): sp.set_edgecolor('#21262d')
-        plt.tight_layout(pad=0.3)
-
-        buf = io.BytesIO()
-        self._fig.savefig(buf, format='png', dpi=90, facecolor='#0d1117', bbox_inches='tight')
-        buf.seek(0)
-        return buf.read()
-
-
-# ── Camera JPEG encoder ──────────────────────────────────────────────────────
-
-def _cam_jpeg(frame):
-    if frame is None:
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(frame, 'No frame', (220, 240),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (60,60,60), 2)
-    _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-    return buf.tobytes()
 
 
 # ── Flask ─────────────────────────────────────────────────────────────────────
@@ -218,67 +250,59 @@ img{width:100%;border-radius:3px;display:block;}
 </style>
 </head>
 <body>
-
 <div class="topbar">
   <span style="color:#3fb950;font-size:15px;font-weight:bold;">QCar 2</span>
   <span>FSM: <b class="{{ sm_state }}">{{ sm_state }}</b></span>
   <span>ZONE: <b class="{{ zone }}">{{ zone }}</b></span>
   <span>TYPE: <b class="{{ obj_type }}">{{ obj_type }}</b></span>
-  <span>BEHAVIOUR: <b class="{{ behaviour }}">{{ behaviour }}</b></span>
-  <span>obstacle: <b>{{ dist }}</b></span>
+  <span>BEH: <b class="{{ behaviour }}">{{ behaviour }}</b></span>
+  <span>obs: <b>{{ dist }}</b></span>
   <span>goal: <b>{{ goal_dist }}</b></span>
-  <span>speed: <b>{{ speed }}</b> m/s</span>
-  <span>battery: <b>{{ battery }}V</b></span>
-  <span style="color:#484f58;font-size:11px;">auto-refresh 500ms</span>
+  <span>spd: <b>{{ speed }}</b></span>
+  <span>batt: <b>{{ battery }}V</b></span>
+  <span>loop: <b>{{ loop_ms }}ms</b></span>
 </div>
-
 <div class="grid3">
   <div class="card">
-    <div class="title">CSI front camera + YOLO</div>
+    <div class="title">CSI front + YOLO</div>
     <img src="/camera" alt="camera">
     <div style="color:#484f58;font-size:11px;margin-top:3px;">
-      {{ n_dets }} detections &bull; {{ yolo_fps }}fps &bull; conf>{{ conf }}
+      {{ n_dets }} dets | {{ yolo_fps }}fps
     </div>
   </div>
   <div class="card">
-    <div class="title">LiDAR scan (polar · up=forward)</div>
+    <div class="title">LiDAR (polar, up=fwd)</div>
     <img src="/lidar" alt="lidar">
     <div style="color:#484f58;font-size:11px;margin-top:3px;">
-      L:{{ lcount }} R:{{ rcount }} close readings &bull; min={{ sector_min }}m
+      fwd min={{ sector_min }}m | rear={{ rear_min }}m
     </div>
   </div>
   <div class="card">
-    <div class="title">RealSense depth (avoidance gap)</div>
+    <div class="title">Depth clearance</div>
     <img src="/depth" alt="depth">
     <div style="color:#484f58;font-size:11px;margin-top:3px;">
       steer: <b>{{ avoid_side }}</b>
     </div>
   </div>
 </div>
-
 <div class="grid3b">
   <div class="card">
-    <div class="title">Obstacle classification</div>
+    <div class="title">Obstacle</div>
     <div class="big {{ obj_type }}">{{ obj_type }}</div>
-    <div style="color:#8b949e;font-size:12px;margin-bottom:6px;">
-      {{ yolo_name }}{% if yolo_conf %} ({{ yolo_conf }}%){% endif %}
-    </div>
-    <div class="row"><span class="lbl">LiDAR dist</span><span class="val {{ zone }}">{{ dist }}</span></div>
+    <div class="row"><span class="lbl">LiDAR fwd</span><span class="val {{ zone }}">{{ dist }}</span></div>
+    <div class="row"><span class="lbl">LiDAR rear</span><span class="val">{{ rear_min }}m</span></div>
     <div class="row"><span class="lbl">Behaviour</span><span class="val {{ behaviour }}">{{ behaviour }}</span></div>
-    <div class="row"><span class="lbl">Avoid side</span><span class="val">{{ avoid_side }}</span></div>
-    <div class="row"><span class="lbl">L clear</span><span class="val">{{ left_m }}</span></div>
-    <div class="row"><span class="lbl">R clear</span><span class="val">{{ right_m }}</span></div>
-    <div class="row"><span class="lbl">Gap width</span><span class="val">{{ gap_px }}px</span></div>
+    <div class="row"><span class="lbl">Avoid</span><span class="val">{{ avoid_side }}</span></div>
+    <div class="row"><span class="lbl">L/R clear</span><span class="val">{{ left_m }} / {{ right_m }}</span></div>
   </div>
-
   <div class="card">
-    <div class="title">Pose + navigation</div>
-    <div class="row"><span class="lbl">x</span><span class="val">{{ px }} m</span></div>
-    <div class="row"><span class="lbl">y</span><span class="val">{{ py }} m</span></div>
-    <div class="row"><span class="lbl">th</span><span class="val">{{ pth }} rad ({{ pth_deg }} deg)</span></div>
-    <div class="row"><span class="lbl">speed</span><span class="val">{{ speed }} m/s</span></div>
-    <div class="row"><span class="lbl">goal dist</span><span class="val">{{ goal_dist }}</span></div>
-    <div class="row"><span class="lbl">heading err</span><span class="val">{{ h_err }} rad</span></div>
+    <div class="title">Pose + nav</div>
+    <div class="row"><span class="lbl">x</span><span class="val">{{ px }}m</span></div>
+    <div class="row"><span class="lbl">y</span><span class="val">{{ py }}m</span></div>
+    <div class="row"><span class="lbl">th</span><span class="val">{{ pth }}rad ({{ pth_deg }}deg)</span></div>
+    <div class="row"><span class="lbl">goal</span><span class="val">{{ goal_dist }}</span></div>
+    <div class="row"><span class="lbl">h_err</span><span class="val">{{ h_err }}rad</span></div>
+    <div class="row"><span class="lbl">FSM</span><span class="val {{ sm_state }}">{{ sm_state }}</span></div>
     <div class="row"><span class="lbl">progress</span>
       <span class="val">
         <div style="width:80px;height:7px;background:#21262d;border-radius:3px;display:inline-block;vertical-align:middle;">
@@ -286,43 +310,30 @@ img{width:100%;border-radius:3px;display:block;}
         </div> {{ progress }}%
       </span>
     </div>
-    <div class="row"><span class="lbl">FSM state</span>
-      <span class="val {{ sm_state }}">{{ sm_state }}</span>
-    </div>
   </div>
-
   <div class="card">
-    <div class="title">LEDs + loop performance</div>
+    <div class="title">LEDs + perf</div>
     <div style="margin-bottom:8px;line-height:2;">
-      <span class="lbl">Headlights</span>
+      <span class="lbl">Head</span>
       <span class="{{ 'led-on' if leds6 else 'led-off' }}"></span>
       <span class="{{ 'led-on' if leds7 else 'led-off' }}"></span>
-      &nbsp;
-      <span class="lbl">Brake</span>
+      <span class="lbl">Brk</span>
       <span class="{{ 'led-on' if leds4 else 'led-off' }}"></span>
-      &nbsp;
-      <span class="lbl">L-ind</span>
+      <span class="lbl">L</span>
       <span class="{{ 'led-on' if leds0 else 'led-off' }}"></span>
-      &nbsp;
-      <span class="lbl">R-ind</span>
+      <span class="lbl">R</span>
       <span class="{{ 'led-on' if leds2 else 'led-off' }}"></span>
     </div>
-    <div class="row"><span class="lbl">Loop mean</span><span class="val">{{ loop_ms }}ms</span></div>
-    <div class="row"><span class="lbl">LiDAR rate</span><span class="val">{{ lidar_hz }}Hz</span></div>
-    <div class="row"><span class="lbl">YOLO fps</span><span class="val">{{ yolo_fps }}</span></div>
-    <div class="row"><span class="lbl">Throttle</span><span class="val">{{ throttle }}</span></div>
-    <div class="row"><span class="lbl">Steering</span><span class="val">{{ steering }} rad</span></div>
-    <div class="row"><span class="lbl">Battery</span><span class="val">{{ battery }}V</span></div>
+    <div class="row"><span class="lbl">Loop</span><span class="val">{{ loop_ms }}ms</span></div>
+    <div class="row"><span class="lbl">LiDAR</span><span class="val">{{ lidar_hz }}Hz</span></div>
+    <div class="row"><span class="lbl">YOLO</span><span class="val">{{ yolo_fps }}fps</span></div>
+    <div class="row"><span class="lbl">Thr</span><span class="val">{{ throttle }}</span></div>
+    <div class="row"><span class="lbl">Str</span><span class="val">{{ steering }}rad</span></div>
+    <div class="row"><span class="lbl">Batt</span><span class="val">{{ battery }}V</span></div>
   </div>
 </div>
-
-<script>
-// Auto-refresh page every 500ms
-setTimeout(()=>location.reload(), 500);
-</script>
-</body>
-</html>
-"""
+<script>setTimeout(()=>location.reload(), 500);</script>
+</body></html>"""
 
 
 @_app.route('/')
@@ -336,12 +347,9 @@ def index():
     avoid    = det.get('avoid_side',     'left')
     lm       = det.get('left_clear_m',   99.0)
     rm       = det.get('right_clear_m',  99.0)
-    lc       = det.get('left_count',     0)
-    rc       = det.get('right_count',    0)
     smin     = det.get('sector_min_m',   99.0)
+    rmin     = det.get('rear_min_m',     99.0)
     gw       = det.get('gap_width_px',   0)
-    yname    = det.get('yolo_name',      '')
-    yconf    = det.get('yolo_conf',      0.0)
     yfps     = det.get('yolo_fps',       0.0)
     ndets    = det.get('n_yolo_dets',    0)
     batt     = det.get('battery_v',      0.0)
@@ -356,28 +364,24 @@ def index():
         zone      = zone,
         behaviour = behav,
         obj_type  = obj_type,
-        dist      = f"{dist_m:.2f}m" if dist_m<90 else "—",
-        goal_dist = f"{dist_goal:.2f}m" if dist_goal<90 else "—",
+        dist      = f"{dist_m:.2f}m" if dist_m<90 else "---",
+        goal_dist = f"{dist_goal:.2f}m" if dist_goal<90 else "---",
         speed     = f"{speed:.2f}",
         battery   = f"{batt:.1f}",
         n_dets    = ndets,
         yolo_fps  = f"{yfps:.0f}",
-        conf      = "0.35",
-        lcount    = lc, rcount=rc,
         sector_min= f"{smin:.2f}",
+        rear_min  = f"{rmin:.1f}" if rmin < 90 else "---",
         avoid_side= avoid.upper(),
-        yolo_name = yname,
-        yolo_conf = f"{yconf*100:.0f}" if yconf>0 else "",
         px=f"{pose[0]:+.3f}", py=f"{pose[1]:+.3f}",
         pth=f"{pose[2]:+.3f}", pth_deg=f"{np.degrees(pose[2]):+.1f}",
         h_err     = f"{h_err:+.3f}",
         progress  = prog,
-        left_m    = f"{lm:.1f}m" if lm<90 else "—",
-        right_m   = f"{rm:.1f}m" if rm<90 else "—",
-        gap_px    = gw,
+        left_m    = f"{lm:.1f}m" if lm<90 else "---",
+        right_m   = f"{rm:.1f}m" if rm<90 else "---",
         leds0=leds[0], leds2=leds[2], leds4=leds[4],
         leds6=leds[6], leds7=leds[7],
-        loop_ms   = f"{timing.get('loop_ms',0):.1f}",
+        loop_ms   = f"{timing.get('loop_ms',0):.0f}",
         lidar_hz  = f"{timing.get('lidar_hz',0):.1f}",
         throttle  = f"{throttle:+.3f}",
         steering  = f"{steering:+.3f}",
@@ -404,32 +408,40 @@ def depth():
 
 class Dashboard:
     """
-    Usage in observer.py:
-        dash = Dashboard()
-        dash.start()
-        while running:
-            dash.update(detection, pose, speed, dist_goal, leds, timing, sm_state,
-                        throttle=t, steering=s, heading_err=he)
+    Dashboard.update() is now INSTANT (~0ms).
+    All rendering runs in a background thread at max 5Hz.
     """
 
     def __init__(self, port: int = 5000):
         self.port          = port
         self._lidar_render = _LidarRenderer()
-        self._depth_render = _DepthRenderer()
+        self._running      = False
+        self._render_thread = None
 
     def start(self):
         import socket, logging
         logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+        # Start Flask
         t = threading.Thread(
             target=lambda: _app.run(host='0.0.0.0', port=self.port, threaded=True),
             daemon=True,
         )
         t.start()
+
+        # Start render thread
+        self._running = True
+        self._render_thread = threading.Thread(
+            target=self._render_loop, daemon=True, name='dash-render'
+        )
+        self._render_thread.start()
+
         try:
             ip = socket.gethostbyname(socket.gethostname())
         except Exception:
             ip = '<jetson-ip>'
         print(f"\n  Dashboard: http://{ip}:{self.port}")
+        print("  Render thread: started (5Hz)")
         print("  Open in your PC browser.\n")
 
     def update(self, detection: dict, pose: np.ndarray,
@@ -437,24 +449,39 @@ class Dashboard:
                leds: list, timing: dict, sm_state: str,
                throttle: float = 0.0, steering: float = 0.0,
                heading_err: float = 0.0):
-
+        """Push data to shared state — NO rendering, returns instantly."""
         timing = dict(timing)
         timing['throttle']    = throttle
         timing['steering']    = steering
         timing['heading_err'] = heading_err
+        _s.push(detection, pose, speed_mps, dist_goal, leds, timing, sm_state)
 
-        _s.update(detection, pose, speed_mps, dist_goal, leds, timing, sm_state)
+    def _render_loop(self):
+        """Background: renders images at max 5Hz. Never blocks main loop."""
+        lidar_counter = 0
+        while self._running:
+            time.sleep(0.2)  # 5Hz max
 
-        # Camera JPEG
-        frame = detection.get('annotated_frame', None)
-        cam_j = _cam_jpeg(frame)
+            snap = _s.pop_for_render()
+            if snap is None:
+                continue
 
-        # LiDAR PNG — only on new scans (reused figure)
-        lidar_p = None
-        if detection.get('new_lidar_scan', False):
-            lidar_p = self._lidar_render.render(detection)
+            det, frame, pose, sm_state = snap
 
-        # Depth PNG — every tick (reused figure)
-        depth_p = self._depth_render.render(detection)
+            # Camera JPEG (~5ms)
+            cam_j = _cam_jpeg(frame)
 
-        _s.set_images(cam_j, lidar_p, depth_p)
+            # Depth chart via OpenCV (~1ms)
+            depth_p = _depth_cv2(det)
+
+            # LiDAR polar plot — only on new scans, max 2Hz (~100ms)
+            lidar_p = None
+            if det.get('new_lidar_scan', False):
+                lidar_counter += 1
+                if lidar_counter % 2 == 0:  # every other scan = ~2Hz
+                    lidar_p = self._lidar_render.render(det)
+
+            _s.set_images(cam_j, lidar_p, depth_p)
+
+    def stop(self):
+        self._running = False

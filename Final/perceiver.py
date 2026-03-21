@@ -112,6 +112,22 @@ class Perceiver:
             self._thread.start()
             print("  YOLO inference thread: started")
 
+    def warmup(self, bgr_frame: np.ndarray = None, depth_frame: np.ndarray = None):
+        """
+        Run one inference to trigger TensorRT engine loading NOW,
+        not lazily during the first real frame. Call during sensor warmup.
+        Takes ~2-5s on first call (engine deserialization + cuDNN init).
+        """
+        if self._yolo is None:
+            return
+        if bgr_frame is None:
+            bgr_frame = np.zeros((self.cfg.IMAGE_HEIGHT, self.cfg.IMAGE_WIDTH, 3), dtype=np.uint8)
+        if depth_frame is None:
+            depth_frame = np.zeros((self.cfg.IMAGE_HEIGHT, self.cfg.IMAGE_WIDTH, 1), dtype=np.float32)
+        print("  YOLO warmup: running first inference (TensorRT engine load)...")
+        self._run_inference(bgr_frame, depth_frame)
+        print("  YOLO warmup: done — engine ready")
+
     def perceive(self, bgr_frame: np.ndarray, depth_frame: np.ndarray) -> dict:
         if self._yolo is None:
             return _empty()
