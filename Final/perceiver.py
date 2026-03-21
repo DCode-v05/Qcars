@@ -5,8 +5,13 @@ Runs YOLOv8s-seg on the front camera. Classifies obstacles as:
   MOVING  → car WAITS (bikes, dogs — unpredictable)
   STATIC  → car STEERS AROUND (boxes, chairs — won't move)
   NONE    → nothing detected
+
+Fixes applied:
+  - Optional threaded inference (decouples YOLO latency from control loop)
+  - Thread-safe frame passing via Event + Lock
 """
 import time
+import threading
 import numpy as np
 from pit.YOLO.nets import YOLOv8
 
@@ -41,6 +46,7 @@ class PerceiverConfig:
     FORWARD_COL_MARGIN = 220   # ±220px from centre = full useful width
     MAX_DIST_M         = 3.0
     MODEL_PATH         = None  # None = use default (auto-downloads)
+    THREADED           = True  # run YOLO in background thread
 
 
 def _empty():
@@ -62,6 +68,10 @@ class Perceiver:
     """
     Wraps YOLOv8s-seg. Call perceive() every tick.
 
+    When threaded=True (default), YOLO inference runs in a background thread.
+    perceive() posts the latest frame and returns the most recent result
+    without blocking the main control loop.
+
     Usage:
         perceiver = Perceiver(PerceiverConfig())
         perceiver.open()
@@ -71,8 +81,19 @@ class Perceiver:
     """
 
     def __init__(self, config: PerceiverConfig):
-        self.cfg   = config
-        self._yolo = None
+        self.cfg       = config
+        self._yolo     = None
+        self._threaded = config.THREADED
+
+        # Threading state
+        self._thread        = None
+        self._running       = False
+        self._frame_lock    = threading.Lock()
+        self._result_lock   = threading.Lock()
+        self._new_frame_evt = threading.Event()
+        self._pending_frame = None
+        self._pending_depth = None
+        self._latest_result = _empty()
 
     def open(self):
         print("  Loading YOLOv8s-seg (uses cached TensorRT engine)...")
@@ -83,10 +104,57 @@ class Perceiver:
         )
         print("  YOLOv8s-seg: OK")
 
+        if self._threaded:
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._inference_loop, daemon=True, name='yolo-thread'
+            )
+            self._thread.start()
+            print("  YOLO inference thread: started")
+
     def perceive(self, bgr_frame: np.ndarray, depth_frame: np.ndarray) -> dict:
-        result = _empty()
         if self._yolo is None:
-            return result
+            return _empty()
+
+        if self._threaded:
+            # Post frame for background processing
+            with self._frame_lock:
+                self._pending_frame = bgr_frame.copy()
+                self._pending_depth = depth_frame.copy()
+            self._new_frame_evt.set()
+
+            # Return latest available result (non-blocking)
+            with self._result_lock:
+                return dict(self._latest_result)
+        else:
+            return self._run_inference(bgr_frame, depth_frame)
+
+    def _inference_loop(self):
+        """Background thread: waits for new frames, runs YOLO, stores result."""
+        while self._running:
+            # Wait for a new frame (with timeout to allow clean shutdown)
+            if not self._new_frame_evt.wait(timeout=0.1):
+                continue
+            self._new_frame_evt.clear()
+
+            # Grab the latest frame
+            with self._frame_lock:
+                if self._pending_frame is None:
+                    continue
+                frame = self._pending_frame
+                depth = self._pending_depth
+                self._pending_frame = None
+
+            # Run inference (this is the slow part — 15-30ms on Jetson)
+            result = self._run_inference(frame, depth)
+
+            # Store result for main thread
+            with self._result_lock:
+                self._latest_result = result
+
+    def _run_inference(self, bgr_frame: np.ndarray, depth_frame: np.ndarray) -> dict:
+        """Single-shot YOLO inference. Thread-safe (no shared state modified)."""
+        result = _empty()
         try:
             img = self._yolo.pre_process(bgr_frame)
             self._yolo.predict(
@@ -102,17 +170,16 @@ class Perceiver:
                 result['annotated_frame'] = img.copy()
                 return result
 
-            # post_processing with depth gives real distances per detection
             detections = self._yolo.post_processing(
-                alignedDepth    = depth_frame,
-                clippingDistance= self.cfg.MAX_DIST_M,
+                alignedDepth     = depth_frame,
+                clippingDistance  = self.cfg.MAX_DIST_M,
             )
 
-            pred0    = self._yolo.predictions[0]
-            class_ids= self._yolo.objectsDetected
-            all_dets = []
-            nearest  = None
-            nearest_d= 99.0
+            pred0     = self._yolo.predictions[0]
+            class_ids = self._yolo.objectsDetected
+            all_dets  = []
+            nearest   = None
+            nearest_d = 99.0
 
             for i, obs in enumerate(detections):
                 cid      = int(class_ids[i])
@@ -121,7 +188,6 @@ class Perceiver:
                 conf     = float(pred0.boxes.conf.cpu().numpy()[i])
                 cx       = int(obs.x)
 
-                # Only report objects in the forward region
                 if abs(cx - self.cfg.FORWARD_COL_CENTRE) > self.cfg.FORWARD_COL_MARGIN:
                     continue
                 if dist_m > self.cfg.MAX_DIST_M:
@@ -155,5 +221,11 @@ class Perceiver:
         return result
 
     def close(self):
+        if self._threaded and self._running:
+            self._running = False
+            self._new_frame_evt.set()   # unblock the wait
+            if self._thread is not None:
+                self._thread.join(timeout=2.0)
+            print("  YOLO inference thread: stopped")
         self._yolo = None
         print("  YOLOv8: released")

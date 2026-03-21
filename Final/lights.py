@@ -22,6 +22,7 @@ STATE_NAVIGATING  = 'NAVIGATING'
 STATE_AVOIDING    = 'AVOIDING'
 STATE_WAITING     = 'WAITING'
 STATE_STOPPED     = 'STOPPED'
+STATE_REVERSING   = 'REVERSING'
 STATE_ARRIVED     = 'ARRIVED'
 
 # Behaviour constants (from obstacle_detector.py)
@@ -81,6 +82,13 @@ class LightController:
         elif state == STATE_STOPPED:
             # Headlights + brake lights
             leds = [0, 0, 0, 0,  1, 0,  1, 1]
+
+        elif state == STATE_REVERSING:
+            # Brake lights + both indicators blinking (reverse warning)
+            if avoid_side == 'left':
+                leds = [blink, blink, 0, 0,  1, 0,  1, 1]
+            else:
+                leds = [0, 0, blink, blink,  1, 0,  1, 1]
 
         elif state == STATE_ARRIVED:
             # All lights off — mission complete

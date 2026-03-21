@@ -61,6 +61,24 @@ class SensorManager:
         self._lidar   = None
         H, W = config.CSI_HEIGHT, config.CSI_WIDTH
         self._blank   = np.zeros((H, W, 3), dtype=np.uint8)
+        self._steering_offset = 0.0   # calibration offset (set after open)
+
+    @property
+    def qcar(self):
+        """Public access to QCar hardware for read_write_std calls."""
+        return self._qcar
+
+    def write_command(self, throttle: float, steering: float, leds: np.ndarray):
+        """
+        Send throttle + steering + LEDs to QCar hardware.
+        Applies steering calibration offset automatically.
+        """
+        corrected_steering = steering + self._steering_offset
+        self._qcar.read_write_std(
+            throttle=throttle,
+            steering=corrected_steering,
+            LEDs=leds,
+        )
 
     def open(self):
         print("\n[SensorManager] Opening sensors...")
@@ -75,6 +93,14 @@ class SensorManager:
         print("  Opening QCar (IMU + encoder)...")
         self._qcar = QCar(frequency=self.cfg.QCAR_FREQUENCY,
                           readMode=self.cfg.QCAR_READ_MODE)
+        # Load steering calibration offset if available
+        try:
+            from pal.products.qcar import QCAR_CONFIG
+            self._steering_offset = float(QCAR_CONFIG.get('steeringOffset', 0.0))
+            if self._steering_offset != 0.0:
+                print(f"  Steering calibration offset: {self._steering_offset:+.4f} rad")
+        except Exception:
+            self._steering_offset = 0.0
         print("  QCar: OK")
 
     def _open_realsense(self):

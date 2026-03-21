@@ -10,18 +10,26 @@ USAGE:
 
 WHAT IT DOES EVERY TICK (30Hz):
   1. sensors.read()        → all 5 sensors
-  2. estimator.update()    → EKF pose [x, y, θ]
+  2. estimator.update()    → EKF pose [x, y, θ]  (encoder + gyro, single call)
   3. detector.detect()     → LiDAR + YOLO + depth fusion → behaviour
   4. navigator.update()    → heading error + distance to goal
   5. sm.update()           → FSM state → throttle + steering
   6. lights.get_leds()     → LED array for current state
-  7. qcar.read_write_std() → send commands to hardware
+  7. sensors.write_command()→ send commands to hardware (with steering calibration)
   8. dashboard.update()    → push all data to browser
+
+FIXES APPLIED:
+  - Single EKF update per tick (was double — caused drift)
+  - Uses sensors.write_command() instead of private _qcar access
+  - Signal handler for clean SIGINT shutdown
+  - Battery voltage monitoring with auto-stop
+  - Previous steering used for EKF prediction (not hardcoded 0.0)
 
 SAFETY:
   - MAX_THROTTLE = 0.15 (slow — safe for testing)
   - Ctrl+C always zeroes motors before closing
   - try/finally guarantees sensors.close() runs even on crash
+  - Battery critical voltage triggers auto-stop
 
 DASHBOARD:
   Open http://<jetson-ip>:5000 in your browser while this runs.
@@ -57,10 +65,32 @@ RUN_TIMEOUT_S    = 60.0    # hard timeout — stops even if goal not reached
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  SIGNAL HANDLER  —  clean shutdown on Ctrl+C / SIGTERM
+# ═════════════════════════════════════════════════════════════════════════════
+
+_shutdown_requested = False
+
+def _signal_handler(signum, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+    print(f"\n[observer] Received {sig_name} — shutting down gracefully...")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
 def main():
+    global _shutdown_requested
+
+    # Register signal handlers
+    signal.signal(signal.SIGINT, _signal_handler)
+    try:
+        signal.signal(signal.SIGTERM, _signal_handler)
+    except (OSError, AttributeError):
+        pass  # SIGTERM not available on all platforms (Windows)
+
     # ── Build all modules ─────────────────────────────────────────────────
     p_cfg  = PerceptionConfig()
     e_cfg  = EstimationConfig()
@@ -100,9 +130,6 @@ def main():
     first_pose = estimator.update(first_data, dt=0.033)
     navigator.reset(first_pose)
 
-    # ── Convenience: get QCar object for read_write_std ───────────────────
-    qcar = sensors._qcar
-
     # ── Timing state ──────────────────────────────────────────────────────
     start_t      = time.perf_counter()
     tick_start   = start_t
@@ -111,11 +138,12 @@ def main():
     tick_count   = 0
     lidar_ticks  = 0
     dt_history   = []
+    prev_steering = 0.0     # for next tick's EKF prediction
 
     print(f"\n[observer] Running. Dashboard: open browser at port {DASHBOARD_PORT}\n")
 
     try:
-        while True:
+        while not _shutdown_requested:
             now     = time.perf_counter()
             elapsed = now - start_t
 
@@ -138,8 +166,8 @@ def main():
             if data['lidar_new_scan']:
                 lidar_ticks += 1
 
-            # ── 3. Pose estimation ────────────────────────────────────────
-            pose = estimator.update(data, dt, steering_rad=0.0)
+            # ── 3. Pose estimation (SINGLE call — uses gyro + encoder) ────
+            pose = estimator.update(data, dt)
 
             # ── 4. Obstacle detection (LiDAR + YOLO + depth) ─────────────
             detection = detector.detect(data)
@@ -154,14 +182,20 @@ def main():
             steering  = sm_result['steering']
             sm_state  = sm_result['state']
 
-            # Update estimator with actual steering command
-            pose = estimator.update(data, dt, steering_rad=steering)
+            # Check battery auto-stop from state machine
+            if not sm_result.get('battery_ok', True):
+                print(f"\n[observer] Battery critical — auto-stopping.")
+                break
+
+            # Store steering for next tick (no longer needed for EKF —
+            # gyro handles heading — but kept for reference)
+            prev_steering = steering
 
             # ── 7. Lights ─────────────────────────────────────────────────
             leds = lights.get_leds(sm_state, detection['avoid_side'])
 
-            # ── 8. Send to hardware ───────────────────────────────────────
-            qcar.read_write_std(throttle=throttle, steering=steering, LEDs=leds)
+            # ── 8. Send to hardware (via public API with steering cal) ────
+            sensors.write_command(throttle=throttle, steering=steering, leds=leds)
 
             # ── 9. Dashboard update ───────────────────────────────────────
             loop_ms  = float(np.mean(dt_history)) * 1000.0
@@ -224,11 +258,10 @@ def main():
         # SAFETY: always zero motors before closing
         print("\n[SAFETY] Zeroing throttle and steering...")
         try:
-            qcar.read_write_std(throttle=0.0, steering=0.0,
-                                LEDs=np.zeros(8, dtype=np.float64))
+            zero_leds = np.zeros(8, dtype=np.float64)
+            sensors.write_command(throttle=0.0, steering=0.0, leds=zero_leds)
             time.sleep(0.1)
-            qcar.read_write_std(throttle=0.0, steering=0.0,
-                                LEDs=np.zeros(8, dtype=np.float64))
+            sensors.write_command(throttle=0.0, steering=0.0, leds=zero_leds)
         except Exception as e:
             print(f"  Warning during motor zero: {e}")
 

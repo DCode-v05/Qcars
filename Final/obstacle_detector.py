@@ -6,6 +6,11 @@ Fuses LiDAR + RealSense + YOLO into one behaviour decision per tick.
   RealSense → WHICH SIDE has clear space?      (avoidance direction)
   YOLO     → WHAT IS IT?                       (person=wait, static=steer)
 
+Fixes applied:
+  - Depth frame validity check (handles RealSense dropout)
+  - Basic LiDAR-angle ↔ YOLO-column correlation for multi-obstacle scenes
+  - Shared constants from constants.py
+
 Behaviour output (used directly by state_machine.py):
   NAVIGATE        → path clear, drive to goal
   WAIT            → person/moving obstacle, hold position
@@ -40,6 +45,10 @@ class DetectorConfig:
     DEPTH_MIN_VALID_PX  = 80
     GAP_MIN_DEPTH_M     = 0.8
     GAP_MIN_WIDTH_PX    = 60
+    # LiDAR-to-camera correlation
+    CAMERA_FOV_RAD      = np.radians(90)    # approximate horizontal FOV of front camera
+    CAMERA_WIDTH_PX     = 640
+    LIDAR_YOLO_ANGLE_TOL = np.radians(10)   # angular tolerance for matching
 
 
 def _empty_result():
@@ -74,7 +83,6 @@ class ObstacleDetector:
     Usage:
         perceiver = Perceiver(PerceiverConfig())
         detector  = ObstacleDetector(DetectorConfig(), perceiver)
-        # perceiver.open() called before loop
         result = detector.detect(sensor_data)
         if result['behaviour'] == BEHAVIOUR_WAIT:
             pass  # person in path
@@ -111,7 +119,15 @@ class ObstacleDetector:
             sensor_data['rs_depth_m'],
         )
 
-        result = self._combine(lidar, depth, perception, new_scan)
+        # Correlate YOLO detection with LiDAR angle if we have both
+        correlated_type = self._correlate_lidar_yolo(
+            sensor_data['lidar_distances'],
+            sensor_data['lidar_angles'],
+            sensor_data['lidar_valid'],
+            perception,
+        )
+
+        result = self._combine(lidar, depth, perception, new_scan, correlated_type)
         result['all_distances']   = sensor_data['lidar_distances'].copy() \
                                     if len(sensor_data['lidar_distances']) > 0 \
                                     else np.array([])
@@ -162,9 +178,22 @@ class ObstacleDetector:
 
     def _analyse_depth(self, depth_frame: np.ndarray) -> dict:
         cfg   = self.cfg
+
+        # Depth validity check — handle RealSense dropout or warmup
+        if depth_frame is None or depth_frame.size == 0:
+            return {'left_clear_m': 99.0, 'right_clear_m': 99.0,
+                    'gap_side': 'left', 'gap_width_px': 0}
+
         strip = depth_frame[cfg.DEPTH_ROW_START:cfg.DEPTH_ROW_END, :, 0]
-        W     = strip.shape[1]
-        mid   = W // 2
+        valid_count = int((strip > 0).sum())
+
+        # If too few valid pixels, depth is unreliable — default to safe
+        if valid_count < cfg.DEPTH_MIN_VALID_PX:
+            return {'left_clear_m': 99.0, 'right_clear_m': 99.0,
+                    'gap_side': 'left', 'gap_width_px': 0}
+
+        W   = strip.shape[1]
+        mid = W // 2
 
         col_means = np.where(strip > 0, strip, np.nan)
         col_means = np.nanmean(col_means, axis=0)
@@ -198,10 +227,63 @@ class ObstacleDetector:
         return {'left_clear_m': lm, 'right_clear_m': rm,
                 'gap_side': gap_side, 'gap_width_px': best_len}
 
-    def _combine(self, lidar, depth, perception, new_scan) -> dict:
+    def _correlate_lidar_yolo(self, distances, angles, valid, perception) -> str:
+        """
+        Basic spatial correlation: map the nearest YOLO detection's image column
+        to a LiDAR angle and check if a LiDAR hit exists at that angle.
+        Returns the YOLO object type if correlation succeeds, else OBJ_NONE.
+
+        This prevents misattribution when multiple objects are in the scene
+        (e.g. person on the left, box on the right — LiDAR sees the box
+        but YOLO's 'nearest' is the person).
+        """
+        cfg = self.cfg
+        nearest_type = perception.get('nearest_type', OBJ_NONE)
+        if nearest_type == OBJ_NONE:
+            return OBJ_NONE
+        if len(distances) == 0 or valid.sum() == 0:
+            return nearest_type  # can't correlate, trust YOLO
+
+        nearest_x = perception.get('nearest_x', cfg.CAMERA_WIDTH_PX // 2)
+        # Map image column to angle: centre=0, left=+angle, right=-angle
+        col_offset = float(nearest_x - cfg.CAMERA_WIDTH_PX // 2)
+        yolo_angle = -(col_offset / (cfg.CAMERA_WIDTH_PX / 2)) * (cfg.CAMERA_FOV_RAD / 2)
+
+        # Normalise to [0, 2π] to match LiDAR convention
+        if yolo_angle < 0:
+            yolo_angle += 2 * np.pi
+
+        # Check if any valid LiDAR reading falls near this angle
+        # within the forward sector and within warning distance
+        fwd_left  = (angles >= 0) & (angles <= cfg.FORWARD_HALF_ANGLE)
+        fwd_right = angles >= (2 * np.pi - cfg.FORWARD_HALF_ANGLE)
+        in_sector = (fwd_left | fwd_right) & valid
+
+        if in_sector.sum() == 0:
+            return nearest_type
+
+        sector_angles = angles[in_sector]
+        sector_dists  = distances[in_sector]
+
+        # Angular distance (handling wrap-around)
+        diff = np.abs(sector_angles - yolo_angle)
+        diff = np.minimum(diff, 2 * np.pi - diff)
+
+        close_mask = diff < cfg.LIDAR_YOLO_ANGLE_TOL
+        if close_mask.sum() > 0 and sector_dists[close_mask].min() < cfg.WARN_DISTANCE_M:
+            # LiDAR confirms obstacle at YOLO's angular position
+            return nearest_type
+
+        # No LiDAR confirmation at YOLO's position — the LiDAR obstacle
+        # may be a different object than what YOLO identified as nearest.
+        # Fall back to generic classification.
+        return OBJ_STATIC
+
+    def _combine(self, lidar, depth, perception, new_scan, correlated_type=None) -> dict:
         zone     = lidar['zone']
         dist     = lidar['distance_m']
-        obj_type = perception['nearest_type']
+        # Use correlated type if available, otherwise fall back to YOLO nearest
+        obj_type = correlated_type if correlated_type else perception['nearest_type']
         avoid    = depth['gap_side']
 
         if zone == ZONE_STOP:

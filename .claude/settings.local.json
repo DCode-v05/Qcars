@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import sys; print\\(sys.executable, sys.version\\)\")",
+      "Bash(\"C:\\\\Users\\\\denis\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m pip install pymupdf)",
+      "Bash(\"C:\\\\Users\\\\denis\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -c \":*)"
+    ]
+  }
+}

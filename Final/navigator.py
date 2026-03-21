@@ -15,6 +15,8 @@ class NavigatorConfig:
     K_HEADING_I      = 0.0
     K_HEADING_D      = 0.05
     MAX_STEERING_RAD = np.pi / 6   # ±30°
+    # Smooth recovery: limit steering rate to avoid jerky transitions
+    MAX_STEER_RATE   = np.pi / 3   # rad/s  —  max steering change per second
 
 
 class Navigator:
@@ -33,11 +35,12 @@ class Navigator:
     """
 
     def __init__(self, config: NavigatorConfig):
-        self.cfg       = config
-        self._goal_x   = 0.0
-        self._goal_y   = 0.0
-        self._ei       = 0.0   # heading error integral
-        self._prev_e   = None
+        self.cfg         = config
+        self._goal_x     = 0.0
+        self._goal_y     = 0.0
+        self._ei         = 0.0   # heading error integral
+        self._prev_e     = None
+        self._prev_steer = 0.0   # for rate-limiting
 
     def reset(self, initial_pose: np.ndarray):
         """
@@ -98,6 +101,14 @@ class Navigator:
         steering = float(np.clip(steering,
                                  -self.cfg.MAX_STEERING_RAD,
                                   self.cfg.MAX_STEERING_RAD))
+
+        # Rate-limit steering to prevent jerky transitions after avoidance
+        if dt > 0.001:
+            max_delta = self.cfg.MAX_STEER_RATE * dt
+            delta = steering - self._prev_steer
+            if abs(delta) > max_delta:
+                steering = self._prev_steer + np.sign(delta) * max_delta
+        self._prev_steer = steering
 
         return {
             'distance_remaining': dist,
