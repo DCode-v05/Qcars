@@ -38,15 +38,24 @@ from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
-FRAME_WIDTH    = 820
-FRAME_HEIGHT   = 410
-FRAME_RATE     = 30.0           # 820x410 is a proven IMX219 mode (Mode 3)
 YOLO_WIDTH     = 640
 JPEG_QUALITY   = 75
 CONF_THRESH    = 0.40
 STREAM_FPS     = 8.0           # MJPEG push rate to browser
-CAM_STAGGER_S  = 0.08          # delay between opening each camera (let ISP settle)
-ISP_GRAB_DELAY = 0.02          # delay between sequential grabs (20ms)
+CAM_STAGGER_S  = 0.30          # delay between opening each camera (let ISP settle)
+ISP_GRAB_DELAY = 0.04          # delay between sequential grabs (40ms)
+
+# Resolution candidates — tried in order until one works per camera
+# IMX219 modes first, then AR0144 / common V4L2 modes
+VIDEO_MODES = [
+    (820, 410, 30.0),    # IMX219 Mode 3
+    (820, 616, 30.0),    # IMX219 Mode 4
+    (1280, 720, 30.0),   # AR0144 / common
+    (1280, 800, 30.0),   # AR0144 native
+    (640, 480, 30.0),    # universal fallback
+    (1920, 1080, 30.0),  # IMX219 1080p
+    (1640, 1232, 30.0),  # IMX219 full-ish
+]
 
 CAMERA_CONFIG = [
     {"id": 0, "name": "RIGHT", "centre_deg":  90.0},
@@ -104,20 +113,24 @@ class ISPScheduler:
     """
     Grabs frames from all 4 CSI cameras via quanser.multimedia.VideoCapture.
 
-    nvargus-daemon on this Jetson only supports ~2 simultaneous CSI streams,
-    so we open-read-close each camera one at a time in round-robin order.
-    Only ONE camera is open at any moment.
+    Different CSI sensors (IMX219 vs AR0144) require different resolutions,
+    so we auto-probe VIDEO_MODES on first open per camera.  Only ONE camera
+    is open at any moment (open-read-close pattern).
     """
 
-    FRAMES_PER_OPEN = 2   # read N frames per open to amortise open/close cost
+    FRAMES_PER_OPEN = 2
 
     def __init__(self, cam_ids: List[int], queues: List[queue.Queue]):
-        self.cam_ids  = cam_ids
-        self.queues   = queues
-        self._running = False
+        self.cam_ids   = cam_ids
+        self.queues    = queues
+        self._running  = False
         self._thread: Optional[threading.Thread] = None
-        self._good    = [0] * len(cam_ids)
-        self._fail    = [0] * len(cam_ids)
+        self._good     = [0] * len(cam_ids)
+        self._fail     = [0] * len(cam_ids)
+        # Per-camera resolved mode: (width, height, fps) or None
+        self._modes: List[Optional[tuple]] = [None] * len(cam_ids)
+        # Per-camera read buffer (re-allocated when mode is resolved)
+        self._bufs: List[Optional[np.ndarray]] = [None] * len(cam_ids)
 
     def start(self):
         self._running = True
@@ -131,36 +144,88 @@ class ISPScheduler:
     def stats(self):
         return list(zip(self._good, self._fail))
 
+    def get_mode(self, idx):
+        return self._modes[idx]
+
     # ── internal ──────────────────────────────────────────────────────────────
-    def _grab_camera(self, cam_id: int, q: queue.Queue, buf: np.ndarray):
-        """Open one camera, read a few frames, close it, push last good frame."""
-        cap = None
+    def _try_open(self, cam_id, w, h, fps):
+        """Try to open a camera at a specific resolution. Returns cap or None."""
         try:
-            url = f"video://localhost:{cam_id}"
             cap = VideoCapture(
-                url,
-                FRAME_RATE,
-                FRAME_WIDTH,
-                FRAME_HEIGHT,
+                f"video://localhost:{cam_id}",
+                fps, w, h,
                 ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
                 ImageDataType.UINT8,
-                None,
-                0
+                None, 0
             )
             cap.start()
+            return cap
         except Exception as ex:
-            idx = self.cam_ids.index(cam_id)
-            self._fail[idx] += 1
-            if self._fail[idx] <= 3:
-                msg = str(ex)
+            logging.debug(f"[ISP] cam {cam_id} open {w}x{h} failed: {ex}")
+            return None
+
+    def _close_cap(self, cap):
+        if cap is None:
+            return
+        try:
+            cap.stop()
+        except Exception:
+            pass
+        try:
+            cap.close()
+        except Exception:
+            pass
+
+    def _probe_camera(self, cam_id: int, idx: int):
+        """Try each VIDEO_MODE until one works. Cache the result.
+        Retries the full mode list up to 3 times to handle transient ISP busy."""
+        for attempt in range(3):
+            for w, h, fps in VIDEO_MODES:
+                if not self._running:
+                    return
+                cap = self._try_open(cam_id, w, h, fps)
+                if cap is None:
+                    time.sleep(0.05)
+                    continue
+                # Skip first warmup frame, then test-read
+                test_buf = np.zeros((h, w, 3), dtype=np.uint8)
+                got = False
                 try:
-                    msg = ex.get_error_message()
+                    cap.read(test_buf)          # warmup (often corrupt)
+                    got = cap.read(test_buf)    # real test
                 except Exception:
-                    pass
-                logging.error(f"[ISP] cannot open cam {cam_id}: {msg}")
+                    got = False
+                self._close_cap(cap)
+                if got:
+                    self._modes[idx] = (w, h, fps)
+                    self._bufs[idx]  = np.zeros((h, w, 3), dtype=np.uint8)
+                    logging.info(f"[ISP] cam {cam_id} probed OK: {w}x{h} @ {fps}fps")
+                    return
+                else:
+                    logging.debug(f"[ISP] cam {cam_id} opened {w}x{h} but read failed")
+            if attempt < 2:
+                logging.warning(f"[ISP] cam {cam_id}: attempt {attempt+1} failed, "
+                                f"retrying in 1s...")
+                time.sleep(1.0)
+        logging.error(f"[ISP] cam {cam_id}: ALL video modes failed after 3 attempts!")
+
+    def _grab_camera(self, cam_id: int, idx: int, q: queue.Queue):
+        """Open camera with its cached mode, read frames, close, push to queue."""
+        mode = self._modes[idx]
+        if mode is None:
+            return
+        w, h, fps = mode
+        buf = self._bufs[idx]
+
+        # Retry open once if ISP is transiently busy
+        cap = self._try_open(cam_id, w, h, fps)
+        if cap is None:
+            time.sleep(0.1)
+            cap = self._try_open(cam_id, w, h, fps)
+        if cap is None:
+            self._fail[idx] += 1
             return
 
-        idx = self.cam_ids.index(cam_id)
         got_any = False
         try:
             for _ in range(self.FRAMES_PER_OPEN):
@@ -176,14 +241,7 @@ class ISPScheduler:
                 else:
                     self._fail[idx] += 1
         finally:
-            try:
-                cap.stop()
-            except Exception:
-                pass
-            try:
-                cap.close()
-            except Exception:
-                pass
+            self._close_cap(cap)
 
         if got_any:
             frame = buf.copy()
@@ -194,28 +252,38 @@ class ISPScheduler:
             except queue.Full: pass
 
     def _loop(self):
-        bufs = [np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
-                for _ in self.cam_ids]
         n = len(self.cam_ids)
+
+        # Phase 1: probe each camera to find its working resolution
+        logging.info(f"[ISP] probing {n} cameras for supported video modes...")
+        for i, cam_id in enumerate(self.cam_ids):
+            if not self._running:
+                return
+            self._probe_camera(cam_id, i)
+            time.sleep(CAM_STAGGER_S)
+
+        resolved = sum(1 for m in self._modes if m is not None)
+        logging.info(f"[ISP] {resolved}/{n} cameras resolved, starting capture loop")
+
+        # Phase 2: round-robin capture
         idx = 0
-
-        logging.info(f"[ISP] open-read-close scheduler started "
-                     f"({self.FRAMES_PER_OPEN} frames/open, {n} cameras)")
-
         while self._running:
-            cam_id = self.cam_ids[idx]
-            self._grab_camera(cam_id, self.queues[idx], bufs[idx])
+            if self._modes[idx] is not None:
+                self._grab_camera(self.cam_ids[idx], idx, self.queues[idx])
             idx = (idx + 1) % n
             time.sleep(ISP_GRAB_DELAY)
 
+
+# Default placeholder size (used before probe completes)
+_PH_W, _PH_H = 820, 410
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Per-camera frame store  (replaces CameraCapture)
 # ══════════════════════════════════════════════════════════════════════════════
 def _placeholder(cam_id):
-    f = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+    f = np.zeros((_PH_H, _PH_W, 3), dtype=np.uint8)
     cv2.putText(f, f"CAM {cam_id} — warming up",
-                (20, FRAME_HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX,
+                (20, _PH_H // 2), cv2.FONT_HERSHEY_SIMPLEX,
                 1.0, (0, 180, 80), 2)
     return f
 
@@ -304,9 +372,9 @@ class YOLOWorker:
 
     def _demo_boxes(self):
         cx = int((math.sin(self._demo_t * 0.7 + self.cam_id) * 0.35 + 0.5)
-                 * FRAME_WIDTH)
-        cy = FRAME_HEIGHT // 2
-        self._demo_t += 1.0 / FRAME_RATE
+                 * _PH_W)
+        cy = _PH_H // 2
+        self._demo_t += 1.0 / 15.0
         return [(0, 0.92, float(cx-55), float(cy-55), 110.0, 110.0)]
 
     def _annotate(self, frame, raw_boxes):
@@ -361,7 +429,7 @@ class YOLOWorker:
                     # which also serves demo frames, but in demo mode we generate here)
                     frame = self._make_demo_frame()
                     raw_boxes = self._demo_boxes()
-                    time.sleep(1.0 / FRAME_RATE)
+                    time.sleep(1.0 / 15.0)
                 else:
                     try:
                         frame = self.isp_q.get(timeout=1.0)
@@ -381,11 +449,11 @@ class YOLOWorker:
                 time.sleep(0.05)
 
     def _make_demo_frame(self):
-        f = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+        f = np.zeros((_PH_H, _PH_W, 3), dtype=np.uint8)
         colours = [(30,60,120),(30,120,60),(120,60,30),(80,30,120)]
         f[:] = colours[self.cam_id % 4]
-        cx = int((math.sin(self._demo_t * 0.7 + self.cam_id)*0.35+0.5)*FRAME_WIDTH)
-        cy = FRAME_HEIGHT // 2
+        cx = int((math.sin(self._demo_t * 0.7 + self.cam_id)*0.35+0.5)*_PH_W)
+        cy = _PH_H // 2
         cv2.circle(f, (cx,cy), 55, (0,255,180), -1)
         cv2.putText(f, f"CAM {self.cam_id}  DEMO",
                     (20,65), cv2.FONT_HERSHEY_SIMPLEX,1.4,(255,255,255),2)
@@ -549,7 +617,7 @@ def main():
     print("=" * 62)
     print(f"  Model  : {model_path}")
     print(f"  Mode   : {'DEMO' if args.demo else 'LIVE — quanser.multimedia sequential scheduler'}")
-    print(f"  Frame  : {FRAME_WIDTH}x{FRAME_HEIGHT}  Capture: {FRAME_RATE}fps")
+    print(f"  Modes  : {len(VIDEO_MODES)} candidates (auto-probe per camera)")
     print(f"  Stream : {STREAM_FPS}fps   Conf: {CONF_THRESH}")
     print("-" * 62)
 
