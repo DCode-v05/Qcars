@@ -395,25 +395,39 @@ class ObstacleDetector:
             a -= 2 * np.pi
 
         if abs(a) <= np.radians(120):
+            # Gap is ahead — drive forward toward it
             forward = True
             steer_angle = a
         else:
+            # Gap is behind — reverse while TURNING to open up a new path
             forward = False
-            steer_angle = a - np.pi if a > 0 else a + np.pi
+
+            # KEY FIX: Don't steer toward the rear gap center (which gives ~0).
+            # Instead, steer hard toward the SIDE with more space so the car
+            # rotates its heading while reversing.
+            if left_dist > right_dist:
+                # More space on left → steer left while reversing (turn right
+                # in reverse = front swings left)
+                steer_angle = cfg.MAX_STEERING_RAD * 0.8
+            elif right_dist > left_dist:
+                steer_angle = -cfg.MAX_STEERING_RAD * 0.8
+            else:
+                # Equal — pick based on gap angle
+                steer_angle = cfg.MAX_STEERING_RAD * 0.6 if a > 0 else -cfg.MAX_STEERING_RAD * 0.6
 
         steer = cfg.STEERING_GAIN * steer_angle
 
-        # Scale steering by distance: more aggressive when far, gentler when close
-        # At 0.3m → scale=0.6, at 1.5m+ → scale=1.0
-        proximity = max(min(front_dist, 1.5), 0.2)
-        scale = 0.4 + 0.6 * (proximity / 1.5)
-        steer *= scale
+        # Forward: scale steering by distance (gentler near obstacles)
+        if forward:
+            proximity = max(min(front_dist, 1.5), 0.2)
+            scale = 0.4 + 0.6 * (proximity / 1.5)
+            steer *= scale
 
-        # Side clearance: reduce steering toward blocked side
-        if steer > 0.05 and right_dist < cfg.SIDE_CLEAR_M:
-            steer = min(steer, 0.03)
-        elif steer < -0.05 and left_dist < cfg.SIDE_CLEAR_M:
-            steer = max(steer, -0.03)
+            # Side clearance: reduce steering toward blocked side
+            if steer > 0.05 and right_dist < cfg.SIDE_CLEAR_M:
+                steer = min(steer, 0.03)
+            elif steer < -0.05 and left_dist < cfg.SIDE_CLEAR_M:
+                steer = max(steer, -0.03)
 
         steer = max(-cfg.MAX_STEERING_RAD, min(steer, cfg.MAX_STEERING_RAD))
         return float(steer), forward
