@@ -643,9 +643,13 @@ function updateLegend(dets) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SOCKET.IO
+// SOCKET.IO  (limit reconnection attempts to avoid reload storm)
 // ═══════════════════════════════════════════════════════════════
-const socket = io();
+const socket = io({
+  reconnectionDelay: 2000,
+  reconnectionDelayMax: 10000,
+  reconnectionAttempts: 50,
+});
 
 socket.on("connect", () => {
   console.log("[SocketIO] connected");
@@ -659,16 +663,20 @@ socket.on("detections", (data) => {
 });
 
 socket.on("disconnect", () => {
-  console.warn("[SocketIO] disconnected");
+  console.warn("[SocketIO] disconnected — will retry automatically");
 });
 
 // ═══════════════════════════════════════════════════════════════
-// MJPEG stream reconnect on error (browser drops stale MJPEG)
+// MJPEG stream reconnect on error (exponential back-off)
 // ═══════════════════════════════════════════════════════════════
 function watchMjpeg(img, src) {
+  let backoff = 1000;
   img.onerror = () => {
-    setTimeout(() => { img.src = src + "?t=" + Date.now(); }, 500);
+    const delay = Math.min(backoff, 8000);
+    backoff = Math.min(backoff * 1.5, 8000);
+    setTimeout(() => { img.src = src + "?t=" + Date.now(); }, delay);
   };
+  img.onload = () => { backoff = 1000; };  // reset on success
 }
 [0,1,2,3].forEach(i => {
   const img = document.getElementById("cam" + i);
