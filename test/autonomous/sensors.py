@@ -1,12 +1,12 @@
 """
 sensors.py — Sensor reading for QCar 2 autonomous driving.
-Opens QCar (IMU/encoder), QCarCameras (4 CSI), QCarLidar (RPLIDAR A2).
-Adapted from Final/perception.py.
+Opens QCar (IMU/encoder), QCarCameras (4 CSI), QCarLidar, RealSense D435.
 """
 import time
 import numpy as np
 import logging
 from pal.products.qcar import QCar, QCarLidar, QCarCameras
+from pal.utilities.vision import Camera3D
 
 import config as cfg
 
@@ -17,22 +17,27 @@ class SensorManager:
 
     Output dict keys:
         timestamp, accelerometer, gyroscope, motor_speed, battery_voltage,
-        csi_frames (list of 4 ndarrays), lidar_distances, lidar_angles,
-        lidar_valid, lidar_new_scan
+        csi_frames (list of 4 ndarrays),
+        rs_rgb (ndarray BGR), rs_depth_m (ndarray float32 metres),
+        lidar_distances, lidar_angles, lidar_valid, lidar_new_scan
     """
 
     def __init__(self):
         self._qcar    = None
         self._cameras = None
+        self._rs      = None
         self._lidar   = None
-        self._blank   = np.zeros((cfg.CSI_HEIGHT, cfg.CSI_WIDTH, 3), dtype=np.uint8)
+        self._blank_csi = np.zeros((cfg.CSI_HEIGHT, cfg.CSI_WIDTH, 3), dtype=np.uint8)
+        self._blank_rs  = np.zeros((cfg.RS_HEIGHT, cfg.RS_WIDTH, 3), dtype=np.uint8)
+        self._blank_depth = np.zeros((cfg.RS_HEIGHT, cfg.RS_WIDTH, 1), dtype=np.float32)
         self._steering_offset = 0.0
 
     def open(self):
         logging.info("[Sensors] Opening hardware...")
         self._open_qcar()
+        self._open_realsense()
         self._open_lidar()
-        self._open_cameras()   # cameras last — avoids GStreamer timeout
+        self._open_cameras()
         self._warmup()
         logging.info("[Sensors] All sensors ready.")
 
@@ -48,6 +53,22 @@ class SensorManager:
         except Exception:
             self._steering_offset = 0.0
         logging.info("  QCar: OK")
+
+    def _open_realsense(self):
+        logging.info("  Opening RealSense D435 (RGB+Depth)...")
+        try:
+            self._rs = Camera3D(
+                mode='RGB&Depth',
+                frameWidthRGB=cfg.RS_WIDTH, frameHeightRGB=cfg.RS_HEIGHT,
+                frameRateRGB=cfg.RS_FPS,
+                frameWidthDepth=cfg.RS_WIDTH, frameHeightDepth=cfg.RS_HEIGHT,
+                frameRateDepth=cfg.RS_FPS,
+            )
+            logging.info(f"  RealSense: OK  RGB={self._rs.imageBufferRGB.shape}  "
+                         f"Depth={self._rs.imageBufferDepthM.shape}")
+        except Exception as e:
+            logging.warning(f"  RealSense open failed: {e} — running without depth")
+            self._rs = None
 
     def _open_lidar(self):
         logging.info("  Opening LiDAR (RPLIDAR A2)...")
@@ -77,6 +98,9 @@ class SensorManager:
         while time.perf_counter() < deadline:
             self._qcar.read()
             self._cameras.readAll()
+            if self._rs:
+                self._rs.read_RGB()
+                self._rs.read_depth(dataMode='M')
             self._lidar.read()
             time.sleep(cfg.LOOP_DT)
 
@@ -84,6 +108,7 @@ class SensorManager:
         t = time.perf_counter()
         imu   = self._read_qcar()
         csi   = self._read_cameras()
+        rs    = self._read_realsense()
         lidar = self._read_lidar()
         return {
             'timestamp':       t,
@@ -91,7 +116,9 @@ class SensorManager:
             'gyroscope':       imu['gyroscope'],
             'motor_speed':     imu['motor_speed'],
             'battery_voltage': imu['battery_voltage'],
-            'csi_frames':      csi,          # list of 4 BGR frames
+            'csi_frames':      csi,
+            'rs_rgb':          rs['rgb'],
+            'rs_depth_m':      rs['depth_m'],
             'lidar_distances': lidar['distances'],
             'lidar_angles':    lidar['angles'],
             'lidar_valid':     lidar['valid'],
@@ -111,15 +138,30 @@ class SensorManager:
         }
 
     def _read_cameras(self) -> list:
-        """Returns list of 4 BGR frames [RIGHT, BACK, FRONT, LEFT]."""
         self._cameras.readAll()
         frames = []
         for cam in self._cameras.csi:
             if cam is not None:
                 frames.append(cam.imageData.copy())
             else:
-                frames.append(self._blank.copy())
+                frames.append(self._blank_csi.copy())
         return frames
+
+    def _read_realsense(self) -> dict:
+        if self._rs is None:
+            return {'rgb': self._blank_rs.copy(),
+                    'depth_m': self._blank_depth.copy()}
+        try:
+            self._rs.read_RGB()
+            self._rs.read_depth(dataMode='M')
+            return {
+                'rgb':     self._rs.imageBufferRGB.copy(),
+                'depth_m': self._rs.imageBufferDepthM.copy(),
+            }
+        except Exception as e:
+            logging.warning(f"  [WARN] RealSense read: {e}")
+            return {'rgb': self._blank_rs.copy(),
+                    'depth_m': self._blank_depth.copy()}
 
     def _read_lidar(self) -> dict:
         flag     = self._lidar.read()
@@ -148,12 +190,17 @@ class SensorManager:
 
     def close(self):
         logging.info("[Sensors] Closing...")
-        if self._lidar:
-            try:
-                self._lidar.terminate()
-                logging.info("  LiDAR: closed")
-            except Exception as e:
-                logging.warning(f"  LiDAR close: {e}")
+        for name, obj, method in [
+            ('LiDAR',     self._lidar,   'terminate'),
+            ('RealSense', self._rs,      'terminate'),
+            ('QCar',      self._qcar,    'terminate'),
+        ]:
+            if obj:
+                try:
+                    getattr(obj, method)()
+                    logging.info(f"  {name}: closed")
+                except Exception as e:
+                    logging.warning(f"  {name} close: {e}")
         if self._cameras:
             try:
                 for cam in self._cameras.csi:
@@ -162,10 +209,4 @@ class SensorManager:
                 logging.info("  CSI cameras: closed")
             except Exception as e:
                 logging.warning(f"  CSI close: {e}")
-        if self._qcar:
-            try:
-                self._qcar.terminate()
-                logging.info("  QCar: closed")
-            except Exception as e:
-                logging.warning(f"  QCar close: {e}")
         logging.info("[Sensors] Shutdown complete.")

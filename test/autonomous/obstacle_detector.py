@@ -1,12 +1,15 @@
 """
-obstacle_detector.py — Vehicle-aware VFH path planner + 360° LiDAR + YOLO fusion.
+obstacle_detector.py — Distance-aware VFH + RealSense depth + YOLO fusion.
 
-Key improvements over basic VFH:
-  1. Obstacles inflated by car half-width (car can't fit through narrow gaps)
-  2. Gap passability checked against turning radius at that distance
-  3. YOLO detections injected INTO the histogram (not just correlated after)
-  4. Side-clearance checks for safe turning
-  5. Steering scaled by obstacle proximity (gentler near obstacles)
+KEY DESIGN: The car NEVER fully stops. Always finds the best available path,
+even if it's tight. Uses distance to decide speed, not whether to stop.
+
+Fixes:
+  1. Distance-weighted histogram — far obstacles don't block as much
+  2. ALWAYS finds a path — fallback to widest/deepest gap or max-distance bin
+  3. RealSense depth catches low obstacles LiDAR misses
+  4. YOLO detections injected with LiDAR-confirmed distance
+  5. Proper distance-based steering scaling
 """
 import math
 import numpy as np
@@ -17,16 +20,6 @@ import config as cfg
 
 
 class ObstacleDetector:
-    """
-    360-degree obstacle detection using LiDAR + YOLO fusion.
-
-    Output dict:
-        zone, behaviour, distance_m, rear_min_m,
-        left_min_m, right_min_m,
-        has_path, best_path_angle, best_gap_width, best_gap_depth,
-        path_steer, drive_forward,
-        obstacle_type, avoid_side
-    """
 
     def __init__(self):
         self._histogram = np.full(cfg.VFH_NUM_BINS, cfg.VFH_PLAN_RANGE_M)
@@ -40,15 +33,20 @@ class ObstacleDetector:
         distances = sensor_data['lidar_distances']
         angles    = sensor_data['lidar_angles']
         valid     = sensor_data['lidar_valid']
+        depth_m   = sensor_data.get('rs_depth_m')
 
-        # 1. Build VFH histogram from LiDAR (with obstacle inflation)
+        # 1. Build VFH histogram from LiDAR
         self._build_histogram(distances, angles, valid)
 
-        # 2. Inject YOLO detections into histogram as virtual obstacles
+        # 2. Inject RealSense depth obstacles (catches low objects)
+        if depth_m is not None:
+            self._inject_depth(depth_m)
+
+        # 3. Inject YOLO detections
         if yolo_dets:
             self._inject_yolo(yolo_dets, distances, angles, valid)
 
-        # 3. Analyse all sectors (front, rear, left, right)
+        # 4. Sector analysis
         front_dist = self._sector_min_hist(0.0, cfg.FRONT_SECTOR_DEG)
         rear_dist  = self._sector_min_hist(np.pi, cfg.REAR_SECTOR_DEG)
         left_dist  = self._sector_min_hist(np.pi * 1.5, cfg.SIDE_SECTOR_DEG)
@@ -59,7 +57,7 @@ class ObstacleDetector:
             self._front_history.append(front_dist)
         smoothed = float(np.mean(self._front_history)) if self._front_history else front_dist
 
-        # 4. Determine zone
+        # 5. Zone (informational only — does NOT cause stopping)
         if smoothed > cfg.ZONE_CLEAR_M:
             zone = 'CLEAR'
         elif smoothed > cfg.ZONE_WARN_M:
@@ -67,48 +65,41 @@ class ObstacleDetector:
         else:
             zone = 'STOP'
 
-        # 5. Find best gap (vehicle-aware)
+        # 6. ALWAYS find a path — never return has_path=False
         gaps = self._find_gaps()
         gaps = self._filter_passable_gaps(gaps)
         best_gap = self._score_gaps(gaps, left_dist, right_dist)
 
-        has_path       = best_gap is not None
-        path_angle     = 0.0
-        gap_width_deg  = 0.0
-        gap_depth      = 0.0
-        path_steer     = 0.0
-        drive_forward  = True
+        # FALLBACK: if no passable gap, find the single best direction
+        if best_gap is None:
+            best_gap = self._fallback_direction()
 
-        if has_path:
-            path_angle    = best_gap['angle']
-            gap_width_deg = best_gap['width_deg']
-            gap_depth     = best_gap['depth']
-            path_steer, drive_forward = self._compute_steering(
-                path_angle, smoothed, left_dist, right_dist)
+        path_angle    = best_gap['angle']
+        gap_width_deg = best_gap['width_deg']
+        gap_depth     = best_gap['depth']
+        path_steer, drive_forward = self._compute_steering(
+            path_angle, smoothed, left_dist, right_dist)
 
-        # 6. YOLO obstacle classification
+        # 7. YOLO classification
         obstacle_type = 'NONE'
         if yolo_dets and zone != 'CLEAR':
             obstacle_type = self._classify_yolo(yolo_dets, distances, angles, valid)
 
-        # 7. Determine behaviour
-        if obstacle_type == 'PERSON' and zone != 'CLEAR':
-            behaviour = 'WAIT'
+        # 8. Behaviour (simplified — no more EMERGENCY_STOP causing full stop)
+        if obstacle_type == 'PERSON' and smoothed < 0.5:
+            behaviour = 'SLOW'     # slow down near person, don't stop
         elif zone == 'STOP':
-            behaviour = 'EMERGENCY_STOP'
+            behaviour = 'AVOID'    # tight space — steer away, keep moving
         elif zone == 'WARN':
             behaviour = 'AVOID'
         else:
             behaviour = 'NAVIGATE'
 
-        # 8. Avoid side from path + side clearance
-        if has_path and behaviour in ('AVOID', 'EMERGENCY_STOP'):
-            norm_angle = path_angle
-            if norm_angle > np.pi:
-                norm_angle -= 2 * np.pi
-            avoid_side = 'LEFT' if norm_angle > 0 else 'RIGHT'
-        else:
-            avoid_side = 'NONE'
+        # Avoid side
+        norm_angle = path_angle
+        if norm_angle > np.pi:
+            norm_angle -= 2 * np.pi
+        avoid_side = 'LEFT' if norm_angle > 0 else 'RIGHT'
 
         return {
             'zone':            zone,
@@ -117,7 +108,7 @@ class ObstacleDetector:
             'rear_min_m':      round(rear_dist, 3),
             'left_min_m':      round(left_dist, 3),
             'right_min_m':     round(right_dist, 3),
-            'has_path':        has_path,
+            'has_path':        True,  # always True now
             'best_path_angle': path_angle,
             'best_gap_width':  gap_width_deg,
             'best_gap_depth':  gap_depth,
@@ -128,11 +119,10 @@ class ObstacleDetector:
         }
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  VFH HISTOGRAM — obstacle inflation by car width
+    #  HISTOGRAM — distance-weighted, inflated
     # ══════════════════════════════════════════════════════════════════════════
 
     def _build_histogram(self, distances, angles, valid):
-        """Build histogram with obstacle inflation for car width."""
         self._histogram[:] = cfg.VFH_PLAN_RANGE_M
         n_bins = cfg.VFH_NUM_BINS
 
@@ -149,27 +139,25 @@ class ObstacleDetector:
             a = angles[i] % (2 * np.pi)
             centre_bin = int(a / (2 * np.pi) * n_bins) % n_bins
 
-            # Inflate obstacle: at distance d, car half-width subtends
-            # an angle of arctan(half_width / d)
+            # Inflate by car width at this distance
             if d > 0.05:
                 inflate_rad = math.atan(cfg.OBSTACLE_INFLATE_M / d)
                 inflate_bins = max(1, int(math.ceil(
                     inflate_rad / cfg.VFH_BIN_WIDTH_RAD)))
+                # Cap inflation — don't let a single far point block everything
+                inflate_bins = min(inflate_bins, 5)
             else:
-                inflate_bins = 3  # very close — block wide sector
+                inflate_bins = 3
 
-            # Mark centre bin + neighbouring bins
             for offset in range(-inflate_bins, inflate_bins + 1):
                 b = (centre_bin + offset) % n_bins
                 if d < self._histogram[b]:
                     self._histogram[b] = d
 
     def _sector_min_hist(self, centre_rad, half_width_deg):
-        """Get minimum distance in a sector from the histogram."""
         n_bins = cfg.VFH_NUM_BINS
         hw_bins = int(half_width_deg / cfg.VFH_BIN_WIDTH_DEG)
         centre_bin = int((centre_rad / (2 * np.pi)) * n_bins) % n_bins
-
         min_d = cfg.VFH_PLAN_RANGE_M
         for offset in range(-hw_bins, hw_bins + 1):
             b = (centre_bin + offset) % n_bins
@@ -178,21 +166,70 @@ class ObstacleDetector:
         return min_d
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  YOLO INJECTION — camera detections become histogram obstacles
+    #  REALSENSE DEPTH — catches low obstacles LiDAR misses
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _inject_depth(self, depth_m):
+        """Scan RealSense depth for close obstacles in the bottom portion
+        of the image (where low/ground-level objects appear)."""
+        if depth_m is None or depth_m.size == 0:
+            return
+
+        # Squeeze to 2D if needed
+        dm = np.squeeze(depth_m)
+        if dm.ndim != 2:
+            return
+
+        h, w = dm.shape
+        roi_top = min(cfg.DEPTH_ROI_TOP, h - 1)
+        roi_bot = min(cfg.DEPTH_ROI_BOT, h)
+        roi = dm[roi_top:roi_bot, :]
+
+        # Divide ROI into columns, each mapped to a front-sector angle
+        n_cols = 12  # divide into 12 angular slices
+        col_width = w // n_cols
+        half_fov = cfg.DEPTH_SECTOR_DEG / 2.0
+
+        n_bins = cfg.VFH_NUM_BINS
+        for c in range(n_cols):
+            col_start = c * col_width
+            col_end   = min(col_start + col_width, w)
+            col_data  = roi[:, col_start:col_end]
+
+            # Get valid (non-zero) depth readings
+            valid_mask = col_data > 0.01
+            if not valid_mask.any():
+                continue
+
+            min_depth = float(col_data[valid_mask].min())
+
+            if min_depth < cfg.DEPTH_WARN_M:
+                # Map column to angle: leftmost col = +half_fov, rightmost = -half_fov
+                frac = (c + 0.5) / n_cols
+                angle_deg = half_fov - frac * cfg.DEPTH_SECTOR_DEG
+                angle_rad = np.radians(angle_deg) % (2 * np.pi)
+                b = int(angle_rad / (2 * np.pi) * n_bins) % n_bins
+
+                # Inject as obstacle if closer than what LiDAR sees
+                if min_depth < self._histogram[b]:
+                    self._histogram[b] = min_depth
+                    # Inflate by 1 bin on each side
+                    for off in [-1, 1]:
+                        bb = (b + off) % n_bins
+                        if min_depth < self._histogram[bb]:
+                            self._histogram[bb] = min_depth
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  YOLO INJECTION
     # ══════════════════════════════════════════════════════════════════════════
 
     def _inject_yolo(self, yolo_dets, distances, angles, valid):
-        """Inject YOLO detections into the VFH histogram.
-        If LiDAR confirms an object nearby, use LiDAR distance.
-        Otherwise, inject at YOLO_INJECT_DIST_M as a conservative estimate."""
         n_bins = cfg.VFH_NUM_BINS
 
         for det in yolo_dets:
             det_angle_rad = np.radians(det.angle_centre) % (2 * np.pi)
-            det_left_rad  = np.radians(det.angle_left) % (2 * np.pi)
-            det_right_rad = np.radians(det.angle_right) % (2 * np.pi)
 
-            # Find closest LiDAR reading within the detection's angular span
+            # Find LiDAR-confirmed distance
             lidar_dist = None
             hw = np.radians(cfg.YOLO_CORR_ANGLE)
             for i in range(len(distances)):
@@ -206,27 +243,32 @@ class ObstacleDetector:
                     if lidar_dist is None or distances[i] < lidar_dist:
                         lidar_dist = float(distances[i])
 
-            inject_dist = lidar_dist if lidar_dist else cfg.YOLO_INJECT_DIST_M
+            # Only inject if LiDAR confirms something nearby
+            # Don't inject far-away YOLO detections as close obstacles
+            if lidar_dist is None:
+                continue
 
-            # Inject into histogram bins covering the detection's angular span
-            bin_left  = int((det_left_rad / (2 * np.pi)) * n_bins) % n_bins
-            bin_right = int((det_right_rad / (2 * np.pi)) * n_bins) % n_bins
+            inject_dist = lidar_dist
 
-            # Handle wrap-around
-            b = bin_left
+            # Inject into histogram
+            det_left  = np.radians(det.angle_left) % (2 * np.pi)
+            det_right = np.radians(det.angle_right) % (2 * np.pi)
+            b_left  = int((det_left / (2 * np.pi)) * n_bins) % n_bins
+            b_right = int((det_right / (2 * np.pi)) * n_bins) % n_bins
+
+            b = b_left
             for _ in range(n_bins):
                 if inject_dist < self._histogram[b]:
                     self._histogram[b] = inject_dist
-                if b == bin_right:
+                if b == b_right:
                     break
                 b = (b + 1) % n_bins
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  GAP FINDING — vehicle-aware passability
+    #  GAP FINDING — always finds something
     # ══════════════════════════════════════════════════════════════════════════
 
     def _find_gaps(self):
-        """Find contiguous open gaps in the histogram."""
         n = cfg.VFH_NUM_BINS
         is_open = self._histogram > cfg.VFH_GAP_THRESH_M
 
@@ -263,23 +305,46 @@ class ObstacleDetector:
         return gaps
 
     def _filter_passable_gaps(self, gaps):
-        """Remove gaps the car can't physically fit through."""
         passable = []
         for gap in gaps:
-            # At the gap's minimum depth, check if angular width is enough
-            # for the car body to pass through
             d = gap['depth_min']
             if d < 0.1:
                 continue
-            # Width needed: 2 * arctan(car_half_width / depth)
             needed_rad = 2 * math.atan(cfg.CAR_HALF_WIDTH_M / d)
             needed_deg = math.degrees(needed_rad)
             if gap['width_deg'] >= needed_deg:
                 passable.append(gap)
         return passable
 
+    def _fallback_direction(self):
+        """When no passable gap exists, pick the direction with most space.
+        The car should ALWAYS have somewhere to go."""
+        n = cfg.VFH_NUM_BINS
+        best_bin = int(np.argmax(self._histogram))
+        best_dist = float(self._histogram[best_bin])
+        angle = best_bin * (2 * np.pi / n)
+
+        # Try to build a small "virtual gap" around the best bin
+        length = 1
+        for off in range(1, 5):
+            left_b  = (best_bin - off) % n
+            right_b = (best_bin + off) % n
+            if (self._histogram[left_b] > cfg.VFH_GAP_THRESH_M * 0.5 or
+                self._histogram[right_b] > cfg.VFH_GAP_THRESH_M * 0.5):
+                length += 1
+            else:
+                break
+
+        return {
+            'start_bin':  best_bin,
+            'length':     max(length, 2),
+            'width_deg':  max(length, 2) * cfg.VFH_BIN_WIDTH_DEG,
+            'depth':      best_dist,
+            'depth_min':  best_dist,
+            'angle':      angle,
+        }
+
     def _score_gaps(self, gaps, left_dist, right_dist):
-        """Score gaps by width, depth, goal alignment, and turning safety."""
         if not gaps:
             return None
 
@@ -287,31 +352,24 @@ class ObstacleDetector:
         best_score = -1.0
 
         for gap in gaps:
-            # Width score (wider = better, saturate at 90°)
             w_score = min(gap['width_deg'] / 90.0, 1.0)
-
-            # Depth score (deeper = better)
             d_score = min(gap['depth'] / cfg.VFH_PLAN_RANGE_M, 1.0)
 
-            # Goal alignment (prefer gaps toward desired heading)
             angle_diff = abs(gap['angle'] - self._goal_heading)
             if angle_diff > np.pi:
                 angle_diff = 2 * np.pi - angle_diff
             g_score = 1.0 - (angle_diff / np.pi)
 
-            # Turn penalty: penalise gaps requiring sharp turns
-            # (gap angle far from straight ahead)
-            gap_angle_norm = gap['angle']
-            if gap_angle_norm > np.pi:
-                gap_angle_norm -= 2 * np.pi
-            turn_severity = abs(gap_angle_norm) / np.pi  # 0=straight, 1=behind
+            gap_norm = gap['angle']
+            if gap_norm > np.pi:
+                gap_norm -= 2 * np.pi
+            turn_severity = abs(gap_norm) / np.pi
             t_penalty = 1.0 - cfg.VFH_TURN_PENALTY * turn_severity
 
-            # Side clearance bonus: if turning left, prefer more left clearance
             side_bonus = 0.0
-            if gap_angle_norm > 0.1 and left_dist > cfg.SIDE_CLEAR_M:
+            if gap_norm > 0.1 and left_dist > cfg.SIDE_CLEAR_M:
                 side_bonus = 0.1
-            elif gap_angle_norm < -0.1 and right_dist > cfg.SIDE_CLEAR_M:
+            elif gap_norm < -0.1 and right_dist > cfg.SIDE_CLEAR_M:
                 side_bonus = 0.1
 
             score = (0.25 * w_score +
@@ -327,44 +385,37 @@ class ObstacleDetector:
         return best
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  STEERING — vehicle geometry aware
+    #  STEERING — distance-aware, uses surrounding space
     # ══════════════════════════════════════════════════════════════════════════
 
     def _compute_steering(self, path_angle_rad, front_dist,
                           left_dist, right_dist):
-        """Convert gap angle to steering command with vehicle constraints."""
-        # Normalize to [-pi, pi]
         a = path_angle_rad
         if a > np.pi:
             a -= 2 * np.pi
 
-        # Decide forward vs reverse
-        if abs(a) <= np.radians(110):
+        if abs(a) <= np.radians(120):
             forward = True
             steer_angle = a
         else:
             forward = False
             steer_angle = a - np.pi if a > 0 else a + np.pi
 
-        # Base steering command
         steer = cfg.STEERING_GAIN * steer_angle
 
-        # Scale down steering near obstacles (gentler turns when close)
-        proximity = min(front_dist, 2.0) / 2.0  # 0..1 (0=very close)
-        proximity_scale = 0.5 + 0.5 * proximity  # 0.5..1.0
-        steer *= proximity_scale
+        # Scale steering by distance: more aggressive when far, gentler when close
+        # At 0.3m → scale=0.6, at 1.5m+ → scale=1.0
+        proximity = max(min(front_dist, 1.5), 0.2)
+        scale = 0.4 + 0.6 * (proximity / 1.5)
+        steer *= scale
 
-        # Check side clearance: don't steer into a wall
+        # Side clearance: reduce steering toward blocked side
         if steer > 0.05 and right_dist < cfg.SIDE_CLEAR_M:
-            # Turning right but right side is blocked
-            steer = min(steer, 0.05)
+            steer = min(steer, 0.03)
         elif steer < -0.05 and left_dist < cfg.SIDE_CLEAR_M:
-            # Turning left but left side is blocked
-            steer = max(steer, -0.05)
+            steer = max(steer, -0.03)
 
-        # Clamp to max steering angle
         steer = max(-cfg.MAX_STEERING_RAD, min(steer, cfg.MAX_STEERING_RAD))
-
         return float(steer), forward
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -372,7 +423,6 @@ class ObstacleDetector:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _classify_yolo(self, yolo_dets, distances, angles, valid):
-        """Classify the most critical obstacle type from YOLO + LiDAR."""
         has_person = False
         has_moving = False
 
@@ -398,5 +448,4 @@ class ObstacleDetector:
             return 'PERSON'
         elif has_moving:
             return 'MOVING'
-        else:
-            return 'STATIC'
+        return 'STATIC'

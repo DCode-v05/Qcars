@@ -206,6 +206,7 @@ def main():
                                   data['lidar_valid'])
                 dash.update_nav(detection, nav_result)
                 dash.update_detections(yolo_dets)
+                dash.update_realsense(data['rs_rgb'], data['rs_depth_m'])
 
             # ── 8. Terminal print every 0.5s ──────────────────────────────
             if elapsed - last_print >= 0.5:

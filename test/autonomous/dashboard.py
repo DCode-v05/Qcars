@@ -46,9 +46,11 @@ class Dashboard:
     def __init__(self, stores):
         self._stores = stores
         self._app = Flask(__name__)
-        self._lidar_data = None     # set by main loop
-        self._nav_data = None       # set by main loop
-        self._det_data = []         # set by main loop
+        self._lidar_data = None
+        self._nav_data = None
+        self._det_data = []
+        self._rs_rgb = None         # RealSense RGB frame
+        self._rs_depth_vis = None   # RealSense depth colorized
         self._data_lock = threading.Lock()
         self._setup_routes()
         self._thread = None
@@ -86,6 +88,22 @@ class Dashboard:
         with self._data_lock:
             self._det_data = [d.to_dict() if hasattr(d, 'to_dict') else d
                               for d in dets]
+
+    def update_realsense(self, rs_rgb, rs_depth_m):
+        """Called from main loop to push RealSense frames."""
+        with self._data_lock:
+            self._rs_rgb = rs_rgb.copy() if rs_rgb is not None else None
+            if rs_depth_m is not None:
+                dm = np.squeeze(rs_depth_m)
+                if dm.ndim == 2:
+                    # Normalize depth to 0-255 for visualization (0-3m range)
+                    d_clip = np.clip(dm, 0, 3.0)
+                    d_norm = (d_clip / 3.0 * 255).astype(np.uint8)
+                    self._rs_depth_vis = cv2.applyColorMap(d_norm, cv2.COLORMAP_JET)
+                else:
+                    self._rs_depth_vis = None
+            else:
+                self._rs_depth_vis = None
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -154,6 +172,30 @@ class Dashboard:
             with self._data_lock:
                 dets = list(self._det_data)
             return jsonify(detections=dets, ts=time.time())
+
+        @app.route("/snapshot/realsense")
+        def rs_rgb():
+            with self._data_lock:
+                frame = self._rs_rgb
+            if frame is None:
+                return "no frame", 404
+            data = self._enc(frame)
+            if not data:
+                return "encode error", 500
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
+
+        @app.route("/snapshot/depth")
+        def rs_depth():
+            with self._data_lock:
+                frame = self._rs_depth_vis
+            if frame is None:
+                return "no frame", 404
+            data = self._enc(frame)
+            if not data:
+                return "encode error", 500
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
 
         @app.route("/healthz")
         def health():
