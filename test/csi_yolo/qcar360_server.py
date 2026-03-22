@@ -43,7 +43,7 @@ YOLO_WIDTH     = 640
 JPEG_QUALITY   = 75
 CONF_THRESH    = 0.40
 STREAM_FPS     = 8.0           # MJPEG push rate to browser
-CAM_STAGGER_S  = 0.30          # delay between opening each camera (let ISP settle)
+CAM_STAGGER_S  = 0.10          # delay between cameras (let ISP settle)
 ISP_GRAB_DELAY = 0.04          # delay between sequential grabs (40ms)
 
 # Resolution candidates — tried in order until one works per camera
@@ -228,6 +228,7 @@ class ISPScheduler:
         cap = self._try_open(cam_id, w, h, fps)
         if cap is None:
             self._fail[idx] += 1
+            logging.warning(f"[ISP] cam {cam_id} grab: open failed")
             return
 
         got_any = False
@@ -235,6 +236,7 @@ class ISPScheduler:
             # Wait for first frame (ISP warmup)
             if not self._wait_first_frame(cap, buf):
                 self._fail[idx] += 1
+                logging.warning(f"[ISP] cam {cam_id} grab: warmup read failed")
                 return
             got_any = True
             self._good[idx] += 1
@@ -260,6 +262,8 @@ class ISPScheduler:
                 except queue.Empty: pass
             try: q.put_nowait(frame)
             except queue.Full: pass
+            logging.info(f"[ISP] cam {cam_id} grabbed frame "
+                         f"({self._good[idx]}g/{self._fail[idx]}f)")
 
     def _loop(self):
         n = len(self.cam_ids)
