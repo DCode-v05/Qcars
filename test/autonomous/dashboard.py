@@ -1,0 +1,113 @@
+"""
+dashboard.py — Minimal web dashboard for monitoring autonomous driving.
+Optional: pass --dashboard to main.py to enable.
+"""
+import os
+import threading
+import time
+import logging
+
+import cv2
+import numpy as np
+from flask import Flask, Response, jsonify
+
+import config as cfg
+
+
+class CamStore:
+    """Thread-safe frame store for one camera."""
+    def __init__(self, cam_id):
+        self.cam_id = cam_id
+        h, w = cfg.CSI_HEIGHT, cfg.CSI_WIDTH
+        self._frame = np.zeros((h, w, 3), dtype=np.uint8)
+        self._raw   = np.zeros((h, w, 3), dtype=np.uint8)
+        self._lock  = threading.Lock()
+
+    def put_raw(self, frame):
+        with self._lock:
+            self._raw = frame.copy()
+
+    def put_annotated(self, frame):
+        with self._lock:
+            self._frame = frame.copy()
+
+    def get_annotated(self):
+        with self._lock:
+            return self._frame.copy()
+
+    def get_raw(self):
+        with self._lock:
+            return self._raw.copy()
+
+
+class Dashboard:
+    """Flask web dashboard for camera feeds and status."""
+
+    def __init__(self, stores):
+        self._stores = stores
+        self._app = Flask(__name__)
+        self._setup_routes()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="dashboard")
+        self._thread.start()
+
+    def stop(self):
+        pass  # daemon thread dies with process
+
+    def _run(self):
+        self._app.run(host="0.0.0.0", port=cfg.DASHBOARD_PORT,
+                      threaded=True, use_reloader=False)
+
+    def _enc(self, frame):
+        ok, buf = cv2.imencode('.jpg', frame,
+                               [cv2.IMWRITE_JPEG_QUALITY, cfg.JPEG_QUALITY])
+        return buf.tobytes() if ok else None
+
+    def _setup_routes(self):
+        app = self._app
+        stores = self._stores
+
+        @app.route("/snapshot/<int:cid>")
+        def snapshot(cid):
+            if cid < 0 or cid >= len(stores):
+                return "not found", 404
+            data = self._enc(stores[cid].get_annotated())
+            if not data:
+                return "encode error", 500
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
+
+        @app.route("/snapshot/panorama")
+        def pano():
+            strips = []
+            labels = ["RIGHT", "BACK", "FRONT", "LEFT"]
+            for i, s in enumerate(stores):
+                f = s.get_annotated()
+                h, w = f.shape[:2]
+                nw = max(1, int(w * 180 / h))
+                strip = cv2.resize(f, (nw, 180))
+                cv2.putText(strip, labels[i], (5, 174),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+                strips.append(strip)
+            pano_img = np.hstack(strips) if strips else np.zeros((180, 820, 3), dtype=np.uint8)
+            data = self._enc(pano_img)
+            if not data:
+                return "encode error", 500
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
+
+        @app.route("/healthz")
+        def health():
+            return jsonify(status="ok", ts=time.time())
+
+        @app.route("/")
+        def index():
+            here = os.path.dirname(os.path.abspath(__file__))
+            html = os.path.join(here, "qcar360_dashboard.html")
+            try:
+                return open(html).read()
+            except FileNotFoundError:
+                return "<h2>Dashboard HTML not found</h2>", 404
