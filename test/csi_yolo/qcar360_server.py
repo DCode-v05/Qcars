@@ -11,8 +11,8 @@ Architecture
     └─ calls cameras.readAll() in a loop
     └─ copies each frame into per-camera queues
 
-  YOLOWorker x N (threads)
-    └─ pulls from camera queue → runs inference → updates annotated frame
+  YOLOProcessor (1 thread, 1 model)
+    └─ round-robin pulls from camera queues → inference → updates annotated frame
 
   Flask snapshot endpoints (no persistent MJPEG connections)
     └─ /snapshot/N returns a single JPEG per request
@@ -224,20 +224,19 @@ class CamStore:
 # ══════════════════════════════════════════════════════════════════════════════
 # YOLO Worker  (one per camera, pulls from ISP queue)
 # ══════════════════════════════════════════════════════════════════════════════
-class YOLOWorker:
-    def __init__(self, cam_cfg, model_path, store: CamStore,
-                 isp_queue: queue.Queue,
-                 use_engine=False, use_demo=False):
-        self.cam_id     = cam_cfg["id"]
-        self.cam_name   = cam_cfg["name"]
-        self.centre_deg = cam_cfg["centre_deg"]
+class YOLOProcessor:
+    """Single YOLO model, processes all cameras round-robin in ONE thread.
+    Prevents GPU OOM / segfault from multiple concurrent CUDA contexts."""
+
+    def __init__(self, cam_cfgs, model_path, stores: List[CamStore],
+                 cam_queues: List[queue.Queue], use_demo=False):
+        self.cam_cfgs   = cam_cfgs
         self.model_path = model_path
-        self.store      = store
-        self.isp_q      = isp_queue
-        self.use_engine = use_engine
+        self.stores     = stores
+        self.cam_queues = cam_queues
         self.use_demo   = use_demo
         self._model     = None
-        self._dets      = []
+        self._dets      = [[] for _ in cam_cfgs]  # per-camera detections
         self._lock      = threading.Lock()
         self._running   = False
         self._demo_t    = 0.0
@@ -245,14 +244,17 @@ class YOLOWorker:
     def start(self):
         self._running = True
         threading.Thread(target=self._loop, daemon=True,
-                         name=f"yolo{self.cam_id}").start()
+                         name="yolo").start()
 
     def stop(self):
         self._running = False
 
-    def get_dets(self):
+    def get_all_dets(self):
         with self._lock:
-            return list(self._dets)
+            out = []
+            for d in self._dets:
+                out.extend(d)
+            return out
 
     def _load(self):
         if self.use_demo:
@@ -260,9 +262,9 @@ class YOLOWorker:
         try:
             from ultralytics import YOLO
             self._model = YOLO(self.model_path)
-            logging.info(f"[YOLO {self.cam_id}] loaded {self.model_path}")
+            logging.info(f"[YOLO] loaded {self.model_path}")
         except Exception as ex:
-            logging.warning(f"[YOLO {self.cam_id}] load failed ({ex}) -> demo")
+            logging.warning(f"[YOLO] load failed ({ex}) -> demo")
             self.use_demo = True
 
     def _infer(self, frame):
@@ -278,17 +280,13 @@ class YOLOWorker:
                                x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy))
         return boxes
 
-    def _demo_boxes(self):
-        cx = int((math.sin(self._demo_t * 0.7 + self.cam_id) * 0.35 + 0.5)
-                 * _PH_W)
-        cy = _PH_H // 2
-        self._demo_t += 1.0 / 15.0
-        return [(0, 0.92, float(cx-55), float(cy-55), 110.0, 110.0)]
-
-    def _annotate(self, frame, raw_boxes):
-        fw, fh    = frame.shape[1], frame.shape[0]
-        annotated = frame.copy()
-        dets      = []
+    def _annotate(self, frame, raw_boxes, cam_cfg):
+        cam_id     = cam_cfg["id"]
+        cam_name   = cam_cfg["name"]
+        centre_deg = cam_cfg["centre_deg"]
+        fw, fh     = frame.shape[1], frame.shape[0]
+        annotated  = frame.copy()
+        dets       = []
 
         for (cls_id, conf, bx, by, bw, bh) in raw_boxes:
             bx = max(0., min(bx, fw-1));  bw = min(bw, fw-bx)
@@ -296,12 +294,12 @@ class YOLOWorker:
             if bw < 2 or bh < 2:
                 continue
 
-            al, ar, ac = box_angles(bx, by, bw, bh, fw, self.centre_deg)
+            al, ar, ac = box_angles(bx, by, bw, bh, fw, centre_deg)
             name = COCO_CLASSES[cls_id] if cls_id < len(COCO_CLASSES) else str(cls_id)
             col  = CLASS_COLOURS[cls_id % len(CLASS_COLOURS)]
 
             dets.append({
-                "cam_id": self.cam_id, "cam_name": self.cam_name,
+                "cam_id": cam_id, "cam_name": cam_name,
                 "class_id": cls_id, "class_name": name,
                 "confidence": round(conf, 3),
                 "bbox_px": [round(bx),round(by),round(bw),round(bh)],
@@ -321,8 +319,8 @@ class YOLOWorker:
         # HUD
         cv2.rectangle(annotated,(0,0),(fw,28),(0,0,0),-1)
         cv2.putText(annotated,
-            f"CAM{self.cam_id} {self.cam_name}  "
-            f"{self.centre_deg-H_FOV_DEG/2:.0f}d->{self.centre_deg+H_FOV_DEG/2:.0f}d"
+            f"CAM{cam_id} {cam_name}  "
+            f"{centre_deg-H_FOV_DEG/2:.0f}d->{centre_deg+H_FOV_DEG/2:.0f}d"
             f"  [{len(dets)} obj]",
             (5,19), cv2.FONT_HERSHEY_SIMPLEX, 0.52,(0,255,128),1,cv2.LINE_AA)
 
@@ -331,49 +329,46 @@ class YOLOWorker:
     def _loop(self):
         self._load()
         first_infer = True
+        n = len(self.cam_cfgs)
+        idx = 0
+
         while self._running:
             try:
+                # Round-robin: try to get a frame from the next camera
+                q     = self.cam_queues[idx]
+                store = self.stores[idx]
+                cfg   = self.cam_cfgs[idx]
+                idx   = (idx + 1) % n
+
+                try:
+                    frame = q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                store.put_raw(frame)
+                store.put_annotated(frame)  # show raw immediately
+
                 if self.use_demo:
-                    frame = self._make_demo_frame()
-                    raw_boxes = self._demo_boxes()
-                    time.sleep(1.0 / 15.0)
+                    raw_boxes = []
                 else:
-                    try:
-                        frame = self.isp_q.get(timeout=1.0)
-                    except queue.Empty:
-                        continue
-                    self.store.put_raw(frame)
-                    # Show raw frame immediately so dashboard isn't blank
-                    self.store.put_annotated(frame)
                     if first_infer:
-                        logging.info(f"[YOLO {self.cam_id}] first inference "
-                                     f"starting (may take 30-60s for TensorRT)...")
+                        logging.info("[YOLO] first inference starting "
+                                     "(may take 30-60s for TensorRT)...")
                     t0 = time.time()
                     raw_boxes = self._infer(frame)
                     if first_infer:
-                        logging.info(f"[YOLO {self.cam_id}] first inference "
-                                     f"done in {time.time()-t0:.1f}s")
+                        logging.info(f"[YOLO] first inference done "
+                                     f"in {time.time()-t0:.1f}s")
                         first_infer = False
 
-                annotated, dets = self._annotate(frame, raw_boxes)
-                self.store.put_annotated(annotated)
+                annotated, dets = self._annotate(frame, raw_boxes, cfg)
+                store.put_annotated(annotated)
                 with self._lock:
-                    self._dets = dets
+                    self._dets[cfg["id"]] = dets
 
             except Exception as ex:
-                logging.error(f"[YOLO {self.cam_id}] {ex}")
+                logging.error(f"[YOLO] {ex}")
                 time.sleep(0.05)
-
-    def _make_demo_frame(self):
-        f = np.zeros((_PH_H, _PH_W, 3), dtype=np.uint8)
-        colours = [(30,60,120),(30,120,60),(120,60,30),(80,30,120)]
-        f[:] = colours[self.cam_id % 4]
-        cx = int((math.sin(self._demo_t * 0.7 + self.cam_id)*0.35+0.5)*_PH_W)
-        cy = _PH_H // 2
-        cv2.circle(f, (cx,cy), 55, (0,255,180), -1)
-        cv2.putText(f, f"CAM {self.cam_id}  DEMO",
-                    (20,65), cv2.FONT_HERSHEY_SIMPLEX,1.4,(255,255,255),2)
-        return f
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -425,10 +420,10 @@ app.config["SECRET_KEY"] = "qcar2"
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*",
                     ping_timeout=20, ping_interval=10)
 
-_stores:  List[CamStore]   = []
-_workers: List[YOLOWorker] = []
-_reader:  Optional[CameraReader] = None
-_agg      = Aggregator()
+_stores:    List[CamStore]   = []
+_yolo:      Optional[YOLOProcessor] = None
+_reader:    Optional[CameraReader] = None
+_agg        = Aggregator()
 
 
 def _enc(frame):
@@ -465,8 +460,7 @@ def raw_snap(cid):
 
 @app.route("/detections")
 def dets_route():
-    all_d=[]
-    for w in _workers: all_d.extend(w.get_dets())
+    all_d = _yolo.get_all_dets() if _yolo else []
     return jsonify(detections=_agg.merge(all_d), ts=time.time())
 
 @app.route("/healthz")
@@ -489,10 +483,9 @@ def index():
 def _push():
     while True:
         try:
-            if _workers:
-                all_d=[]
-                for w in _workers: all_d.extend(w.get_dets())
-                merged=_agg.merge(all_d)
+            if _yolo:
+                all_d = _yolo.get_all_dets()
+                merged = _agg.merge(all_d)
                 if merged:
                     parts=[f"{d['class_name']} "
                            f"{d['angle_left']:.0f}d-{d['angle_right']:.0f}d"
@@ -535,10 +528,10 @@ def main():
 
     def _bye(sig, frame):
         print("\n[INFO] Shutting down ...")
+        if _yolo: _yolo.stop()
         if _reader:
             _reader.stop()
             _reader.terminate()
-        for w in _workers: w.stop()
         time.sleep(0.5)
         os._exit(0)
 
@@ -559,13 +552,11 @@ def main():
     else:
         print("  Demo mode -- cameras not used")
 
-    # Start YOLO workers
-    for cfg, store, q in zip(CAMERA_CONFIG, _stores, cam_queues):
-        w = YOLOWorker(cfg, model_path, store, q,
-                       use_engine=args.engine, use_demo=args.demo)
-        w.start()
-        _workers.append(w)
-        print(f"  YOLO {cfg['id']} ({cfg['name']}) started")
+    # Start single YOLO processor (one model, all cameras round-robin)
+    _yolo = YOLOProcessor(CAMERA_CONFIG, model_path, _stores, cam_queues,
+                          use_demo=args.demo)
+    _yolo.start()
+    print("  YOLO processor started (single model, round-robin)")
 
     threading.Thread(target=_push, daemon=True, name="push").start()
 
