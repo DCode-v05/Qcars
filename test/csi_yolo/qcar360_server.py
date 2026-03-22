@@ -51,10 +51,9 @@ ISP_GRAB_DELAY = 0.04          # delay between sequential grabs (40ms)
 VIDEO_MODES = [
     (820, 410, 120.0),   # IMX219 Mode 3 — confirmed working on QCar 2
     (820, 616, 60.0),    # IMX219 Mode 4
-    (1280, 720, 60.0),   # AR0144 / common
-    (1280, 800, 30.0),   # AR0144 native
-    (640, 480, 60.0),    # universal fallback
-    (1920, 1080, 30.0),  # IMX219 1080p
+    (640, 480, 30.0),    # universal fallback
+    (1280, 720, 60.0),   # common HD
+    (1640, 820, 30.0),   # IMX219 half-res
     (1640, 1232, 30.0),  # IMX219 full-ish
 ]
 
@@ -152,25 +151,15 @@ class ISPScheduler:
     def _try_open(self, cam_id, w, h, fps):
         """Try to open a camera at a specific resolution. Returns cap or None."""
         url = f"video://localhost:{cam_id}"
-        cap = None
+        cap = VideoCapture()
         try:
-            cap = VideoCapture(url, fps, w, h,
-                               ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
-                               ImageDataType.UINT8, None, 0)
-        except MediaError as me:
-            logging.warning(f"[ISP] cam {cam_id} VideoCapture({w}x{h}@{fps}) "
-                            f"constructor failed: {me.get_error_message()}")
-            return None
-        except Exception as ex:
-            logging.warning(f"[ISP] cam {cam_id} VideoCapture({w}x{h}@{fps}) "
-                            f"constructor failed: {ex}")
-            return None
-
-        try:
+            cap.open(url, fps, w, h,
+                     ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+                     ImageDataType.UINT8, [], 0)
             cap.start()
             return cap
         except MediaError as me:
-            logging.warning(f"[ISP] cam {cam_id} start({w}x{h}@{fps}) "
+            logging.warning(f"[ISP] cam {cam_id} open({w}x{h}@{fps}) "
                             f"failed: {me.get_error_message()}")
             try:
                 cap.close()
@@ -178,7 +167,7 @@ class ISPScheduler:
                 pass
             return None
         except Exception as ex:
-            logging.warning(f"[ISP] cam {cam_id} start({w}x{h}@{fps}) "
+            logging.warning(f"[ISP] cam {cam_id} open({w}x{h}@{fps}) "
                             f"failed: {ex}")
             try:
                 cap.close()
@@ -660,25 +649,30 @@ def main():
 
     if not args.demo:
         # Quick sanity check: try opening cam 0 on the main thread first
-        print("  Pre-flight: testing cam 0 on main thread ...")
+        # Quick sanity check: find at least one working camera
+        print("  Pre-flight: probing cameras ...")
         _preflight_ok = False
-        for w, h, fps in VIDEO_MODES:
-            try:
-                _tc = VideoCapture(f"video://localhost:0", fps, w, h,
-                                   ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
-                                   ImageDataType.UINT8, None, 0)
-                _tc.start()
-                _tb = np.zeros((h, w, 3), dtype=np.uint8)
-                _tc.read(_tb)
-                _tc.stop()
-                _tc.close()
-                print(f"  Pre-flight: cam 0 OK at {w}x{h}@{fps}")
-                _preflight_ok = True
+        for cam_id in [cfg["id"] for cfg in CAMERA_CONFIG]:
+            for w, h, fps in VIDEO_MODES:
+                try:
+                    _tc = VideoCapture()
+                    _tc.open(f"video://localhost:{cam_id}", fps, w, h,
+                             ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+                             ImageDataType.UINT8, [], 0)
+                    _tc.start()
+                    _tb = np.zeros((h, w, 3), dtype=np.uint8)
+                    _tc.read(_tb)
+                    _tc.stop()
+                    _tc.close()
+                    print(f"  Pre-flight: cam {cam_id} OK at {w}x{h}@{fps}")
+                    _preflight_ok = True
+                    break
+                except MediaError:
+                    pass
+                except Exception:
+                    pass
+            if _preflight_ok:
                 break
-            except MediaError as me:
-                print(f"  Pre-flight: {w}x{h}@{fps} -> {me.get_error_message()}")
-            except Exception as ex:
-                print(f"  Pre-flight: {w}x{h}@{fps} -> {ex}")
 
         if not _preflight_ok:
             print("\n  *** ALL video modes failed on cam 0! ***")
