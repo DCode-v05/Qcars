@@ -34,6 +34,7 @@ import numpy as np
 from flask import Flask, Response, jsonify
 from flask_socketio import SocketIO
 from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
+from quanser.multimedia.exceptions import MediaError
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -150,18 +151,39 @@ class ISPScheduler:
     # ── internal ──────────────────────────────────────────────────────────────
     def _try_open(self, cam_id, w, h, fps):
         """Try to open a camera at a specific resolution. Returns cap or None."""
+        url = f"video://localhost:{cam_id}"
+        cap = None
         try:
-            cap = VideoCapture(
-                f"video://localhost:{cam_id}",
-                fps, w, h,
-                ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
-                ImageDataType.UINT8,
-                None, 0
-            )
+            cap = VideoCapture(url, fps, w, h,
+                               ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+                               ImageDataType.UINT8, None, 0)
+        except MediaError as me:
+            logging.warning(f"[ISP] cam {cam_id} VideoCapture({w}x{h}@{fps}) "
+                            f"constructor failed: {me.get_error_message()}")
+            return None
+        except Exception as ex:
+            logging.warning(f"[ISP] cam {cam_id} VideoCapture({w}x{h}@{fps}) "
+                            f"constructor failed: {ex}")
+            return None
+
+        try:
             cap.start()
             return cap
+        except MediaError as me:
+            logging.warning(f"[ISP] cam {cam_id} start({w}x{h}@{fps}) "
+                            f"failed: {me.get_error_message()}")
+            try:
+                cap.close()
+            except Exception:
+                pass
+            return None
         except Exception as ex:
-            logging.warning(f"[ISP] cam {cam_id} open {w}x{h}@{fps} failed: {ex}")
+            logging.warning(f"[ISP] cam {cam_id} start({w}x{h}@{fps}) "
+                            f"failed: {ex}")
+            try:
+                cap.close()
+            except Exception:
+                pass
             return None
 
     def _close_cap(self, cap):
@@ -637,6 +659,36 @@ def main():
         _stores.append(CamStore(cfg["id"]))
 
     if not args.demo:
+        # Quick sanity check: try opening cam 0 on the main thread first
+        print("  Pre-flight: testing cam 0 on main thread ...")
+        _preflight_ok = False
+        for w, h, fps in VIDEO_MODES:
+            try:
+                _tc = VideoCapture(f"video://localhost:0", fps, w, h,
+                                   ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+                                   ImageDataType.UINT8, None, 0)
+                _tc.start()
+                _tb = np.zeros((h, w, 3), dtype=np.uint8)
+                _tc.read(_tb)
+                _tc.stop()
+                _tc.close()
+                print(f"  Pre-flight: cam 0 OK at {w}x{h}@{fps}")
+                _preflight_ok = True
+                break
+            except MediaError as me:
+                print(f"  Pre-flight: {w}x{h}@{fps} -> {me.get_error_message()}")
+            except Exception as ex:
+                print(f"  Pre-flight: {w}x{h}@{fps} -> {ex}")
+
+        if not _preflight_ok:
+            print("\n  *** ALL video modes failed on cam 0! ***")
+            print("  Check:")
+            print("    1. sudo systemctl restart nvargus-daemon")
+            print("    2. ls /dev/video*   (cameras detected?)")
+            print("    3. No other process using cameras")
+            print("    4. Run:  python stream-back.py  (does single cam work?)")
+            print("-" * 62)
+
         # Start ISP scheduler (open-read-close per camera, one at a time)
         _isp = ISPScheduler([cfg["id"] for cfg in CAMERA_CONFIG], isp_queues)
         _isp.start()
