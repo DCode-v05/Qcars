@@ -180,7 +180,7 @@ def main():
 
             # ── 7. State machine ──────────────────────────────────────────
             sm_result = sm.update(detection, nav_result, data, dt)
-            throttle  = sm_result['throttle']
+            throttle  = -sm_result['throttle']
             steering  = sm_result['steering']
             sm_state  = sm_result['state']
 
