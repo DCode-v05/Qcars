@@ -87,25 +87,34 @@ class Navigator:
             self.state = 'REVERSING'
         else:
             # ── Autonomous decision ───────────────────────────────────────
-            # FORWARD FIRST: exhaust ALL forward options before reversing.
-            # Only reverse when entire front ±60° is truly blocked.
+            # PHYSICS: car turning radius = 0.44m. If obstacle is closer
+            # than that, turning alone CANNOT clear it — must reverse.
             #
-            # Priority ladder (check forward possibilities FIRST):
-            #   1. VFH found forward gap → DRIVING
-            #   2. Front not critically close → DRIVING
-            #   3. Any side has space → DRIVING (turn hard)
-            #   4. ALL of above fail → REVERSING (only if rear clear)
-            #   5. Truly boxed in → still DRIVING (creep with max steer)
+            # Priority:
+            #   1. Too close to turn? → MUST reverse (physics constraint)
+            #   2. VFH found forward gap with clearance → DRIVING
+            #   3. Front not critically close → DRIVING
+            #   4. All forward blocked → REVERSING
 
-            if drive_fwd:
+            too_close_to_turn = front_dist < cfg.MIN_TURN_RADIUS_M
+
+            if too_close_to_turn and rear_dist > cfg.REAR_CLEAR_M:
+                # Physics: can't turn at this distance, must back up
+                self.state = 'REVERSING'
+            elif too_close_to_turn:
+                # Too close AND rear blocked — try turning hard anyway
+                self.state = 'DRIVING'
+            elif drive_fwd:
+                # VFH found a forward gap — go
                 self.state = 'DRIVING'
             elif front_dist > cfg.ZONE_WARN_M:
-                self.state = 'DRIVING'
-            elif left_dist > 0.3 or right_dist > 0.3:
+                # Front isn't critical — keep driving
                 self.state = 'DRIVING'
             elif rear_dist > cfg.REAR_CLEAR_M:
+                # No forward gap and front is close — reverse
                 self.state = 'REVERSING'
             else:
+                # Boxed in — creep forward with max steer
                 self.state = 'DRIVING'
 
         # ── Compute throttle + steering ───────────────────────────────────
