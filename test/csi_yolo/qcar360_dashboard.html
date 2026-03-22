@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QCar 2 · 360° Perception</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+  :root {
+    --bg:       #080c0f;
+    --panel:    #0d1318;
+    --border:   #1a2a1a;
+    --green:    #00ff88;
+    --green2:   #00cc66;
+    --amber:    #ffaa00;
+    --red:      #ff3344;
+    --cyan:     #00e5ff;
+    --dim:      #2a3a2a;
+    --text:     #c8e8c8;
+    --subtext:  #5a7a5a;
+    --font-hud: 'Share Tech Mono', monospace;
+    --font-ttl: 'Orbitron', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-hud);
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: 56px 1fr 220px 180px;
+    grid-template-columns: 1fr 340px;
+    gap: 2px;
+    overflow: hidden;
+  }
+
+  /* ── HEADER ── */
+  header {
+    grid-column: 1 / -1;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 24px;
+  }
+  header h1 {
+    font-family: var(--font-ttl);
+    font-size: 14px;
+    font-weight: 900;
+    letter-spacing: 4px;
+    color: var(--green);
+    text-shadow: 0 0 12px #00ff8866;
+  }
+  .hdr-sep { width: 1px; height: 30px; background: var(--border); }
+  .hdr-stat {
+    font-size: 10px;
+    color: var(--subtext);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .hdr-stat span { color: var(--green); font-size: 11px; }
+  .hdr-right { margin-left: auto; display: flex; gap: 16px; align-items: center; }
+  .dot-live {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; box-shadow: 0 0 8px var(--green); }
+    50%      { opacity: .5; box-shadow: 0 0 2px var(--green); }
+  }
+  .badge {
+    font-size: 10px;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    color: var(--subtext);
+    letter-spacing: 1px;
+  }
+
+  /* ── CAMERA GRID (top-left) ── */
+  #cam-grid {
+    grid-row: 2;
+    grid-column: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 2px;
+    background: #000;
+    overflow: hidden;
+  }
+  .cam-cell {
+    position: relative;
+    background: #000;
+    overflow: hidden;
+  }
+  .cam-cell img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .cam-label {
+    position: absolute;
+    top: 6px; left: 6px;
+    font-family: var(--font-ttl);
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--green);
+    background: rgba(0,0,0,.7);
+    padding: 2px 6px;
+    border-left: 2px solid var(--green);
+  }
+  .cam-fov {
+    position: absolute;
+    bottom: 6px; right: 6px;
+    font-size: 9px;
+    color: var(--subtext);
+    background: rgba(0,0,0,.6);
+    padding: 2px 5px;
+  }
+  .cam-det-count {
+    position: absolute;
+    bottom: 6px; left: 6px;
+    font-size: 10px;
+    color: var(--amber);
+    background: rgba(0,0,0,.7);
+    padding: 2px 6px;
+    display: none;
+  }
+  .cam-det-count.has-det { display: block; }
+
+  /* ── RADAR (top-right) ── */
+  #radar-panel {
+    grid-row: 2;
+    grid-column: 2;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 8px 8px;
+    gap: 10px;
+  }
+  #radar-panel h2 {
+    font-family: var(--font-ttl);
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--subtext);
+  }
+  #radar-canvas {
+    border-radius: 50%;
+    background: radial-gradient(circle, #0a1a0a 0%, #060e06 100%);
+    border: 1px solid var(--dim);
+    box-shadow: 0 0 20px #00ff8811 inset, 0 0 30px #00ff8808;
+  }
+  #compass-legend {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 12px;
+    width: 100%;
+    padding: 0 4px;
+  }
+  .cl-item {
+    font-size: 9px;
+    color: var(--subtext);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .cl-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ── PANORAMA STRIP ── */
+  #pano-panel {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 8px 12px 6px;
+    gap: 6px;
+  }
+  #pano-panel h3 {
+    font-family: var(--font-ttl);
+    font-size: 8px;
+    letter-spacing: 3px;
+    color: var(--subtext);
+  }
+  #pano-img {
+    width: 100%;
+    height: calc(100% - 30px);
+    object-fit: cover;
+    display: block;
+    border: 1px solid var(--dim);
+  }
+
+  /* ── DETECTION TABLE ── */
+  #det-panel {
+    grid-row: 4;
+    grid-column: 1 / -1;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #det-header {
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  #det-header h3 {
+    font-family: var(--font-ttl);
+    font-size: 8px;
+    letter-spacing: 3px;
+    color: var(--subtext);
+  }
+  #det-count-badge {
+    font-size: 10px;
+    color: var(--amber);
+    margin-left: auto;
+  }
+  #det-table-wrap {
+    flex: 1;
+    overflow-x: auto;
+    overflow-y: auto;
+  }
+  #det-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  #det-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    color: var(--subtext);
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-align: left;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  #det-table tbody tr {
+    border-bottom: 1px solid #0d1a0d;
+    transition: background .15s;
+  }
+  #det-table tbody tr:hover { background: #0d1f0d; }
+  #det-table tbody td {
+    padding: 5px 12px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .td-class { color: var(--green); font-weight: bold; }
+  .td-angles { color: var(--cyan); font-family: var(--font-hud); }
+  .td-cam   { color: var(--subtext); font-size: 10px; }
+  .td-conf  { color: var(--amber); }
+  .conf-bar {
+    display: inline-block;
+    height: 6px;
+    background: var(--green2);
+    border-radius: 2px;
+    margin-left: 6px;
+    vertical-align: middle;
+    opacity: .7;
+  }
+  .td-arc {
+    position: relative;
+    min-width: 120px;
+  }
+  .arc-track {
+    position: relative;
+    height: 8px;
+    background: var(--dim);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 2px;
+  }
+  .arc-fill {
+    position: absolute;
+    top: 0; bottom: 0;
+    background: var(--cyan);
+    opacity: .5;
+    border-radius: 2px;
+  }
+
+  /* ── SCANLINE OVERLAY ── */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,255,136,.015) 2px,
+      rgba(0,255,136,.015) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <h1>QCAR&nbsp;2&nbsp;·&nbsp;360°&nbsp;PERCEPTION</h1>
+  <div class="hdr-sep"></div>
+  <div class="hdr-stat">H-FOV / CAM <span>160°</span></div>
+  <div class="hdr-sep"></div>
+  <div class="hdr-stat">CAMERAS <span>4 × CSI</span></div>
+  <div class="hdr-sep"></div>
+  <div class="hdr-stat">INFERENCE <span>YOLOv8</span></div>
+  <div class="hdr-right">
+    <div class="badge" id="fps-badge">-- FPS</div>
+    <div class="badge" id="det-badge">0 OBJ</div>
+    <div class="dot-live"></div>
+    <div class="badge" id="time-badge">--:--:--</div>
+  </div>
+</header>
+
+<!-- CAMERA GRID -->
+<div id="cam-grid">
+  <div class="cam-cell" id="cell-0">
+    <img id="cam0" src="/video/0" alt="CAM 0">
+    <div class="cam-label">FRONT · 0°</div>
+    <div class="cam-fov">−80° ↔ +80°</div>
+    <div class="cam-det-count" id="cnt0">0</div>
+  </div>
+  <div class="cam-cell" id="cell-1">
+    <img id="cam1" src="/video/1" alt="CAM 1">
+    <div class="cam-label">RIGHT · 90°</div>
+    <div class="cam-fov">10° ↔ 170°</div>
+    <div class="cam-det-count" id="cnt1">0</div>
+  </div>
+  <div class="cam-cell" id="cell-2">
+    <img id="cam2" src="/video/2" alt="CAM 2">
+    <div class="cam-label">BACK · 180°</div>
+    <div class="cam-fov">100° ↔ 260°</div>
+    <div class="cam-det-count" id="cnt2">0</div>
+  </div>
+  <div class="cam-cell" id="cell-3">
+    <img id="cam3" src="/video/3" alt="CAM 3">
+    <div class="cam-label">LEFT · 270°</div>
+    <div class="cam-fov">190° ↔ 350°</div>
+    <div class="cam-det-count" id="cnt3">0</div>
+  </div>
+</div>
+
+<!-- RADAR -->
+<div id="radar-panel">
+  <h2>RADAR · BIRD'S EYE · 360°</h2>
+  <canvas id="radar-canvas" width="300" height="300"></canvas>
+  <div id="compass-legend"></div>
+</div>
+
+<!-- PANORAMA STRIP -->
+<div id="pano-panel">
+  <h3>PANORAMA STRIP · FRONT → RIGHT → BACK → LEFT</h3>
+  <img id="pano-img" src="/video/panorama" alt="panorama">
+</div>
+
+<!-- DETECTION TABLE -->
+<div id="det-panel">
+  <div id="det-header">
+    <h3>DETECTION LOG · WORLD ANGLES</h3>
+    <span id="det-count-badge">0 detections</span>
+  </div>
+  <div id="det-table-wrap">
+    <table id="det-table">
+      <thead>
+        <tr>
+          <th>CLASS</th>
+          <th>ANGLE START</th>
+          <th>ANGLE END</th>
+          <th>SPAN</th>
+          <th>ARC VISUALISER</th>
+          <th>CAMERA</th>
+          <th>CONFIDENCE</th>
+        </tr>
+      </thead>
+      <tbody id="det-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// CONFIG (must match server)
+// ═══════════════════════════════════════════════════════════════
+const H_FOV      = 160;     // degrees per camera
+const CAM_CENTRES = [0, 90, 180, 270];
+const CAM_NAMES   = ["FRONT", "RIGHT", "BACK", "LEFT"];
+
+// Class → pastel colour map (HSL spread)
+function classColour(id) {
+  const h = (id * 137.508) % 360;
+  return `hsl(${h},80%,65%)`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CLOCK
+// ═══════════════════════════════════════════════════════════════
+setInterval(() => {
+  document.getElementById("time-badge").textContent =
+    new Date().toLocaleTimeString("en-GB");
+}, 1000);
+
+// ═══════════════════════════════════════════════════════════════
+// FPS counter
+// ═══════════════════════════════════════════════════════════════
+let _frameTimes = [];
+function tickFPS() {
+  const now = performance.now();
+  _frameTimes.push(now);
+  _frameTimes = _frameTimes.filter(t => now - t < 2000);
+  const fps = (_frameTimes.length / 2).toFixed(1);
+  document.getElementById("fps-badge").textContent = fps + " FPS";
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RADAR CANVAS
+// ═══════════════════════════════════════════════════════════════
+const RC     = document.getElementById("radar-canvas");
+const RCX    = RC.getContext("2d");
+const R_SIZE = RC.width;
+const R_CX   = R_SIZE / 2;
+const R_CY   = R_SIZE / 2;
+const R_RMAX = R_SIZE / 2 - 10;
+
+let _detections = [];
+let _radarAngle = 0;   // sweep
+
+function drawRadar(dets) {
+  const ctx = RCX;
+  ctx.clearRect(0, 0, R_SIZE, R_SIZE);
+
+  // Background circles
+  ctx.strokeStyle = "#1a2a1a";
+  ctx.lineWidth = 1;
+  for (let r = 1; r <= 4; r++) {
+    ctx.beginPath();
+    ctx.arc(R_CX, R_CY, R_RMAX * r / 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Cardinal spokes
+  const cardinals = ["N(0°)", "E(90°)", "S(180°)", "W(270°)"];
+  ctx.font = "9px 'Share Tech Mono'";
+  ctx.fillStyle = "#2a4a2a";
+  for (let i = 0; i < 4; i++) {
+    const a = (i * 90 - 90) * Math.PI / 180;
+    ctx.beginPath();
+    ctx.moveTo(R_CX, R_CY);
+    ctx.lineTo(R_CX + Math.cos(a) * R_RMAX, R_CY + Math.sin(a) * R_RMAX);
+    ctx.strokeStyle = "#1a3a1a";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "#3a6a3a";
+    ctx.fillText(cardinals[i],
+      R_CX + Math.cos(a) * (R_RMAX + 2) - 14,
+      R_CY + Math.sin(a) * (R_RMAX + 2) + 4);
+  }
+
+  // Camera FOV arcs
+  const camColours = ["#00ff8830","#00e5ff30","#ffaa0030","#ff334430"];
+  for (let i = 0; i < 4; i++) {
+    const centre = CAM_CENTRES[i];
+    const start  = (centre - H_FOV / 2 - 90) * Math.PI / 180;
+    const end    = (centre + H_FOV / 2 - 90) * Math.PI / 180;
+    ctx.beginPath();
+    ctx.moveTo(R_CX, R_CY);
+    ctx.arc(R_CX, R_CY, R_RMAX, start, end);
+    ctx.closePath();
+    ctx.fillStyle = camColours[i];
+    ctx.fill();
+    ctx.strokeStyle = camColours[i].replace("30", "80");
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // Sweep line
+  const sA = (_radarAngle - 90) * Math.PI / 180;
+  const grad = ctx.createLinearGradient(R_CX, R_CY,
+    R_CX + Math.cos(sA) * R_RMAX,
+    R_CY + Math.sin(sA) * R_RMAX);
+  grad.addColorStop(0,   "rgba(0,255,136,0)");
+  grad.addColorStop(1,   "rgba(0,255,136,0.8)");
+  ctx.beginPath();
+  ctx.moveTo(R_CX, R_CY);
+  ctx.lineTo(R_CX + Math.cos(sA) * R_RMAX,
+             R_CY + Math.sin(sA) * R_RMAX);
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Detection arcs
+  for (const d of dets) {
+    const aL = (d.angle_left  - 90) * Math.PI / 180;
+    const aR = (d.angle_right - 90) * Math.PI / 180;
+    const col = classColour(d.class_id);
+
+    // Filled arc sector (medium radius)
+    ctx.beginPath();
+    ctx.moveTo(R_CX, R_CY);
+    ctx.arc(R_CX, R_CY, R_RMAX * 0.55, aL, aR);
+    ctx.closePath();
+    ctx.fillStyle = col + "44";
+    ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Label at centre angle
+    const aC = (d.angle_centre - 90) * Math.PI / 180;
+    const lx = R_CX + Math.cos(aC) * R_RMAX * 0.65;
+    const ly = R_CY + Math.sin(aC) * R_RMAX * 0.65;
+    ctx.font = "bold 9px 'Share Tech Mono'";
+    ctx.fillStyle = col;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // Background pill
+    const lw = ctx.measureText(d.class_name).width;
+    ctx.fillStyle = "rgba(8,12,15,0.85)";
+    ctx.fillRect(lx - lw/2 - 3, ly - 7, lw + 6, 14);
+    ctx.fillStyle = col;
+    ctx.fillText(d.class_name, lx, ly);
+    ctx.textAlign = "left";
+  }
+
+  // QCar body
+  ctx.beginPath();
+  ctx.arc(R_CX, R_CY, 8, 0, Math.PI * 2);
+  ctx.fillStyle = "#00ff88";
+  ctx.fill();
+  // Arrow for front
+  ctx.beginPath();
+  ctx.moveTo(R_CX, R_CY - 16);
+  ctx.lineTo(R_CX - 5, R_CY - 8);
+  ctx.lineTo(R_CX + 5, R_CY - 8);
+  ctx.closePath();
+  ctx.fillStyle = "#00ff88";
+  ctx.fill();
+}
+
+// Radar sweep animation
+let _lastSweepTs = 0;
+function animateRadar(ts) {
+  const dt = Math.min((ts - _lastSweepTs) / 1000, 0.1);
+  _lastSweepTs = ts;
+  _radarAngle = (_radarAngle + dt * 60) % 360;  // 60°/s
+  drawRadar(_detections);
+  tickFPS();
+  requestAnimationFrame(animateRadar);
+}
+requestAnimationFrame(animateRadar);
+
+// ═══════════════════════════════════════════════════════════════
+// DETECTION TABLE
+// ═══════════════════════════════════════════════════════════════
+function updateTable(dets) {
+  const tbody = document.getElementById("det-tbody");
+  tbody.innerHTML = "";
+
+  const camCounts = [0, 0, 0, 0];
+  dets.forEach(d => { camCounts[d.cam_id] = (camCounts[d.cam_id] || 0) + 1; });
+
+  for (let i = 0; i < 4; i++) {
+    const cnt = document.getElementById("cnt" + i);
+    if (camCounts[i] > 0) {
+      cnt.textContent = camCounts[i] + " obj";
+      cnt.classList.add("has-det");
+    } else {
+      cnt.textContent = "0";
+      cnt.classList.remove("has-det");
+    }
+  }
+
+  document.getElementById("det-badge").textContent    = dets.length + " OBJ";
+  document.getElementById("det-count-badge").textContent = dets.length + " detection" + (dets.length !== 1 ? "s" : "");
+
+  for (const d of dets) {
+    const col   = classColour(d.class_id);
+    const span  = ((d.angle_right - d.angle_left + 360) % 360).toFixed(1);
+    const conf  = (d.confidence * 100).toFixed(0);
+    const barW  = Math.round(d.confidence * 60);
+
+    // Arc visualiser bar positions (0–360 → 0–100%)
+    const pL = (d.angle_left  / 360 * 100).toFixed(1);
+    const pW = (parseFloat(span) / 360 * 100).toFixed(1);
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="td-class" style="color:${col}">${d.class_name}</td>
+      <td class="td-angles">${d.angle_left.toFixed(1)}°</td>
+      <td class="td-angles">${d.angle_right.toFixed(1)}°</td>
+      <td class="td-angles" style="color:#ffaa00">${span}°</td>
+      <td class="td-arc">
+        <div class="arc-track">
+          <div class="arc-fill"
+               style="left:${pL}%;width:${pW}%;background:${col}"></div>
+        </div>
+      </td>
+      <td class="td-cam">CAM ${d.cam_id} · ${d.cam_name}</td>
+      <td class="td-conf">${conf}%
+        <span class="conf-bar" style="width:${barW}px;background:${col}"></span>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COMPASS LEGEND (class colours)
+// ═══════════════════════════════════════════════════════════════
+function updateLegend(dets) {
+  const seen = {};
+  dets.forEach(d => { seen[d.class_id] = {name: d.class_name, col: classColour(d.class_id)}; });
+  const legend = document.getElementById("compass-legend");
+  legend.innerHTML = "";
+  Object.values(seen).slice(0, 8).forEach(v => {
+    legend.innerHTML += `
+      <div class="cl-item">
+        <div class="cl-dot" style="background:${v.col}"></div>
+        ${v.name}
+      </div>`;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SOCKET.IO
+// ═══════════════════════════════════════════════════════════════
+const socket = io();
+
+socket.on("connect", () => {
+  console.log("[SocketIO] connected");
+});
+
+socket.on("detections", (data) => {
+  const dets = data.detections || [];
+  _detections = dets;
+  updateTable(dets);
+  updateLegend(dets);
+});
+
+socket.on("disconnect", () => {
+  console.warn("[SocketIO] disconnected");
+});
+
+// ═══════════════════════════════════════════════════════════════
+// MJPEG stream reconnect on error (browser drops stale MJPEG)
+// ═══════════════════════════════════════════════════════════════
+function watchMjpeg(img, src) {
+  img.onerror = () => {
+    setTimeout(() => { img.src = src + "?t=" + Date.now(); }, 500);
+  };
+}
+[0,1,2,3].forEach(i => {
+  const img = document.getElementById("cam" + i);
+  watchMjpeg(img, `/video/${i}`);
+});
+watchMjpeg(document.getElementById("pano-img"), "/video/panorama");
+</script>
+</body>
+</html>
