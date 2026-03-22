@@ -655,6 +655,7 @@ def _push_detections_loop():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    global CONF_THRESH
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
@@ -670,7 +671,6 @@ def main():
                         help=f"YOLO confidence threshold (default {CONF_THRESH})")
     args = parser.parse_args()
 
-    global CONF_THRESH
     CONF_THRESH = args.conf
 
     print("=" * 60)
