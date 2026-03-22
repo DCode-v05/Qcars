@@ -40,12 +40,14 @@ class Navigator:
             detection: dict from ObstacleDetector.detect()
             dt: time step
         """
-        zone      = detection['zone']
-        behaviour = detection['behaviour']
-        has_path  = detection['has_path']
+        zone       = detection['zone']
+        behaviour  = detection['behaviour']
+        has_path   = detection['has_path']
         path_steer = detection['path_steer']
         drive_fwd  = detection['drive_forward']
         rear_clear = detection['rear_min_m'] > cfg.REAR_CLEAR_M
+        left_clear = detection.get('left_min_m', 9.0) > cfg.SIDE_CLEAR_M
+        right_clear = detection.get('right_min_m', 9.0) > cfg.SIDE_CLEAR_M
         now        = time.perf_counter()
 
         # ── State transitions ─────────────────────────────────────────────
