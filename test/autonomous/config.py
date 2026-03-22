@@ -55,6 +55,7 @@ RS_FPS             = 30
 # LiDAR (RPLIDAR A2)
 LIDAR_NUM_MEAS     = 384
 LIDAR_RANGE_MODE   = 2
+LIDAR_FRONT_DEG    = 180.0      # LiDAR 180° = car's actual front (calibrated)
 LIDAR_INTERP       = 0
 LIDAR_MIN_M        = 0.10
 LIDAR_MAX_M        = 6.0

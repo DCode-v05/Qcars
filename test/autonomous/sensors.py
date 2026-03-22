@@ -173,7 +173,13 @@ class SensorManager:
                     'valid': np.array([], dtype=bool), 'new_scan': False}
         distances = np.asarray(raw_dist).flatten().astype(np.float32)
         angles    = np.asarray(raw_ang).flatten().astype(np.float32)
-        valid     = (distances >= cfg.LIDAR_MIN_M) & (distances <= cfg.LIDAR_MAX_M)
+
+        # CRITICAL: Rotate LiDAR frame so 0 rad = car's actual front.
+        # The LiDAR's 0° points backward; car front is at LIDAR_FRONT_DEG (180°).
+        rotation = np.radians(cfg.LIDAR_FRONT_DEG)
+        angles = (angles - rotation) % (2 * np.pi)
+
+        valid = (distances >= cfg.LIDAR_MIN_M) & (distances <= cfg.LIDAR_MAX_M)
         return {'distances': distances, 'angles': angles,
                 'valid': valid, 'new_scan': bool(flag)}
 
