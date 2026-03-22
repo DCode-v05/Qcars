@@ -390,44 +390,37 @@ class ObstacleDetector:
 
     def _compute_steering(self, path_angle_rad, front_dist,
                           left_dist, right_dist):
+        """Compute forward steering toward the best gap.
+        Returns (steer, drive_forward).
+        drive_forward=False ONLY when ALL forward paths are truly blocked."""
         a = path_angle_rad
         if a > np.pi:
             a -= 2 * np.pi
 
-        if abs(a) <= np.radians(120):
-            # Gap is ahead — drive forward toward it
-            forward = True
-            steer_angle = a
-        else:
-            # Gap is behind — reverse while TURNING to open up a new path
-            forward = False
+        # Is the best gap reachable going forward? (within ±120° of front)
+        forward = abs(a) <= np.radians(120)
 
-            # KEY FIX: Don't steer toward the rear gap center (which gives ~0).
-            # Instead, steer hard toward the SIDE with more space so the car
-            # rotates its heading while reversing.
-            if left_dist > right_dist:
-                # More space on left → steer left while reversing (turn right
-                # in reverse = front swings left)
-                steer_angle = cfg.MAX_STEERING_RAD * 0.8
-            elif right_dist > left_dist:
-                steer_angle = -cfg.MAX_STEERING_RAD * 0.8
-            else:
-                # Equal — pick based on gap angle
-                steer_angle = cfg.MAX_STEERING_RAD * 0.6 if a > 0 else -cfg.MAX_STEERING_RAD * 0.6
-
-        steer = cfg.STEERING_GAIN * steer_angle
-
-        # Forward: scale steering by distance (gentler near obstacles)
         if forward:
+            steer = cfg.STEERING_GAIN * a
+
+            # Scale steering by distance (gentler when close)
             proximity = max(min(front_dist, 1.5), 0.2)
             scale = 0.4 + 0.6 * (proximity / 1.5)
             steer *= scale
 
-            # Side clearance: reduce steering toward blocked side
+            # Side clearance check
             if steer > 0.05 and right_dist < cfg.SIDE_CLEAR_M:
                 steer = min(steer, 0.03)
             elif steer < -0.05 and left_dist < cfg.SIDE_CLEAR_M:
                 steer = max(steer, -0.03)
+        else:
+            # Best gap is behind — report this to navigator.
+            # Provide a forward steering suggestion toward the SIDE with more space
+            # (navigator will decide whether to actually reverse)
+            if left_dist > right_dist:
+                steer = cfg.MAX_STEERING_RAD * 0.7
+            else:
+                steer = -cfg.MAX_STEERING_RAD * 0.7
 
         steer = max(-cfg.MAX_STEERING_RAD, min(steer, cfg.MAX_STEERING_RAD))
         return float(steer), forward

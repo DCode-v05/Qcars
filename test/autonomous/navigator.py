@@ -1,131 +1,157 @@
 """
-navigator.py — Steering + throttle decisions. Car NEVER fully stops.
+navigator.py — Forward-biased navigation with manual override & IMU crash detection.
+
+RULES:
+  1. ALWAYS prefer forward. Only reverse when ALL forward paths are blocked.
+  2. No timers — car never stops on its own (only 'q' or Ctrl+C).
+  3. 'd' = force DRIVE (forward), 'r' = force REVERSE (manual override).
+  4. IMU spike = crash detected → immediately reverse away.
 
 States:
-  NAVIGATING  — path clear, full throttle
-  AVOIDING    — obstacle nearby, steer around, full throttle
-  CREEPING    — very tight space, reduced throttle but still moving
-  REVERSING   — best path is behind, reverse
-  SLOWING     — person detected nearby, slow down briefly
+  DRIVING     — forward, steering toward best path
+  REVERSING   — all forward paths blocked OR crash detected, backing up with turn
+  MANUAL_FWD  — user pressed 'd', forced forward
+  MANUAL_REV  — user pressed 'r', forced reverse
 """
 import time
 import numpy as np
-import logging
 
 import config as cfg
 
 
+# IMU crash detection thresholds
+CRASH_ACCEL_G     = 2.5     # acceleration spike > 2.5g = crash
+CRASH_COOLDOWN_S  = 2.0     # after crash reverse, wait before allowing another
+GRAVITY_MPS2      = 9.81
+
+
 class Navigator:
-    """
-    The car ALWAYS moves. Throttle is either:
-      - cfg.THROTTLE (0.10) for normal driving
-      - cfg.CREEP_THROTTLE (0.04) for tight spaces / near person
-      - -cfg.THROTTLE (-0.10) for reversing
-    Never zero.
-    """
 
     def __init__(self):
-        self.state           = 'NAVIGATING'
+        self.state           = 'DRIVING'
         self._last_steer     = 0.0
-        self._reverse_start  = 0.0
-        self._reverse_end    = 0.0   # cooldown: don't re-enter reverse immediately
-        self._slow_start     = 0.0
+        self._manual_mode    = None    # 'd' or 'r' or None
+        self._crash_time     = 0.0
+        self._crash_reversing = False
 
     def reset(self):
-        self.state = 'NAVIGATING'
+        self.state = 'DRIVING'
         self._last_steer = 0.0
-        self._reverse_end = 0.0
+        self._manual_mode = None
+        self._crash_reversing = False
 
-    def update(self, detection, dt):
-        zone       = detection['zone']
-        behaviour  = detection['behaviour']
+    def set_manual(self, mode):
+        """Called from key listener: 'd'=forward, 'r'=reverse, None=auto."""
+        self._manual_mode = mode
+
+    def update(self, detection, dt, imu_accel=None):
+        """
+        Returns dict with throttle, steering, state, leds.
+
+        Args:
+            detection: dict from ObstacleDetector
+            dt: time step
+            imu_accel: numpy array [ax, ay, az] in m/s^2 (optional)
+        """
         path_steer = detection['path_steer']
         drive_fwd  = detection['drive_forward']
         front_dist = detection['distance_m']
-        rear_clear = detection['rear_min_m'] > cfg.REAR_CLEAR_M
+        rear_dist  = detection['rear_min_m']
+        left_dist  = detection.get('left_min_m', 9.0)
+        right_dist = detection.get('right_min_m', 9.0)
+        zone       = detection['zone']
         now        = time.perf_counter()
 
-        # ── State transitions ─────────────────────────────────────────────
+        # ── IMU crash detection ───────────────────────────────────────────
+        crash_detected = False
+        if imu_accel is not None:
+            accel_mag = np.linalg.norm(imu_accel)
+            # Remove gravity, check for spike
+            excess = abs(accel_mag - GRAVITY_MPS2)
+            if excess > CRASH_ACCEL_G * GRAVITY_MPS2:
+                if now - self._crash_time > CRASH_COOLDOWN_S:
+                    crash_detected = True
+                    self._crash_time = now
+                    self._crash_reversing = True
 
-        if self.state == 'REVERSING':
-            if now - self._reverse_start > cfg.REVERSE_TIMEOUT_S:
-                # After reversing, force CREEPING forward with turn
-                # (don't jump back to REVERSING immediately)
-                self.state = 'CREEPING'
-                self._reverse_end = now
-            elif not rear_clear:
-                self.state = 'CREEPING'
-                self._reverse_end = now
+        # Crash reverse: back away for a bit
+        if self._crash_reversing:
+            if now - self._crash_time > 1.0:
+                self._crash_reversing = False
 
-        if self.state == 'SLOWING':
-            if now - self._slow_start > cfg.PERSON_PAUSE_S:
-                self.state = 'NAVIGATING'
-            elif behaviour != 'SLOW':
-                self.state = 'NAVIGATING'
+        # ── Manual override ───────────────────────────────────────────────
+        if self._manual_mode == 'd':
+            self.state = 'MANUAL_FWD'
+        elif self._manual_mode == 'r':
+            self.state = 'MANUAL_REV'
+        elif self._crash_reversing:
+            self.state = 'REVERSING'
+        else:
+            # ── Autonomous decision ───────────────────────────────────────
+            # FORWARD BIAS: only reverse when truly no forward option exists
+            #
+            # Check: is there ANY forward-ish path?
+            # drive_fwd from VFH means the best gap is within ±120° of front.
+            # Even in STOP zone, if drive_fwd=True, go forward (just slowly).
 
-        # Fresh decisions for non-locked states
-        # Reverse cooldown: after reversing, must creep forward for 1.5s
-        # before allowing another reverse
-        reverse_cooldown = (now - self._reverse_end) < 1.5
-
-        if self.state in ('NAVIGATING', 'AVOIDING', 'CREEPING'):
-            if behaviour == 'SLOW':
-                self.state = 'SLOWING'
-                self._slow_start = now
-            elif zone == 'STOP' and not drive_fwd and rear_clear and not reverse_cooldown:
-                # Front blocked, path behind, and not in cooldown — reverse
-                self.state = 'REVERSING'
-                self._reverse_start = now
-            elif zone == 'STOP':
-                # Very tight OR in reverse cooldown — creep forward with turn
-                self.state = 'CREEPING'
-            elif zone == 'WARN':
-                self.state = 'AVOIDING'
+            if drive_fwd:
+                # There IS a forward path — always go forward
+                if zone == 'CLEAR':
+                    self.state = 'DRIVING'
+                else:
+                    self.state = 'DRIVING'  # avoid = still drive forward, just steer
             else:
-                self.state = 'NAVIGATING'
+                # VFH says ALL forward paths are blocked, best gap is behind.
+                # Double-check: is front truly blocked AND rear is clear?
+                if front_dist < cfg.ZONE_WARN_M and rear_dist > cfg.REAR_CLEAR_M:
+                    self.state = 'REVERSING'
+                else:
+                    # Front is somewhat clear OR rear is also blocked — creep forward
+                    self.state = 'DRIVING'
 
         # ── Compute throttle + steering ───────────────────────────────────
 
-        if self.state == 'NAVIGATING':
+        if self.state == 'DRIVING':
             throttle = cfg.THROTTLE
-            steering = self._smooth_steer(path_steer, dt)
-
-        elif self.state == 'AVOIDING':
-            throttle = cfg.THROTTLE
-            steering = self._smooth_steer(path_steer, dt)
-
-        elif self.state == 'CREEPING':
-            # Still moving! Just slower for tight spaces
-            throttle = cfg.CREEP_THROTTLE
             steering = self._smooth_steer(path_steer, dt)
 
         elif self.state == 'REVERSING':
             throttle = -cfg.THROTTLE
+            # Steer toward side with more space while reversing
+            if left_dist > right_dist:
+                rev_steer = cfg.MAX_STEERING_RAD * 0.7
+            elif right_dist > left_dist:
+                rev_steer = -cfg.MAX_STEERING_RAD * 0.7
+            else:
+                rev_steer = cfg.MAX_STEERING_RAD * 0.5 if path_steer > 0 else -cfg.MAX_STEERING_RAD * 0.5
+            steering = self._smooth_steer(rev_steer, dt)
+
+        elif self.state == 'MANUAL_FWD':
+            throttle = cfg.THROTTLE
             steering = self._smooth_steer(path_steer, dt)
 
-        elif self.state == 'SLOWING':
-            # Near person — slow creep, still steering
-            throttle = cfg.CREEP_THROTTLE
+        elif self.state == 'MANUAL_REV':
+            throttle = -cfg.THROTTLE
             steering = self._smooth_steer(path_steer, dt)
 
         else:
-            throttle = cfg.CREEP_THROTTLE
+            throttle = cfg.THROTTLE
             steering = self._smooth_steer(path_steer, dt)
 
-        # ── Throttle scaling by distance ──────────────────────────────────
-        # Reduce throttle proportionally when close to obstacles
+        # ── Distance-based throttle scaling (forward only) ────────────────
         if throttle > 0 and front_dist < cfg.ZONE_CLEAR_M:
-            dist_ratio = max(front_dist, 0.1) / cfg.ZONE_CLEAR_M
-            scaled = cfg.CREEP_THROTTLE + (cfg.THROTTLE - cfg.CREEP_THROTTLE) * dist_ratio
+            ratio = max(front_dist, 0.1) / cfg.ZONE_CLEAR_M
+            scaled = cfg.CREEP_THROTTLE + (cfg.THROTTLE - cfg.CREEP_THROTTLE) * ratio
             throttle = min(throttle, scaled)
 
         leds = self._get_leds(detection.get('avoid_side', 'NONE'))
 
         return {
-            'throttle': throttle,
-            'steering': steering,
-            'state':    self.state,
-            'leds':     leds,
+            'throttle':       throttle,
+            'steering':       steering,
+            'state':          self.state,
+            'leds':           leds,
+            'crash_detected': crash_detected,
         }
 
     def _smooth_steer(self, target, dt):
@@ -139,19 +165,18 @@ class Navigator:
 
     def _get_leds(self, avoid_side):
         leds = np.zeros(8, dtype=np.float64)
-        leds[6] = leds[7] = 1.0  # headlights always on
+        leds[6] = leds[7] = 1.0  # headlights
 
-        if self.state == 'AVOIDING' or self.state == 'CREEPING':
-            if avoid_side == 'LEFT':
-                leds[0] = leds[1] = 1.0
-            elif avoid_side == 'RIGHT':
-                leds[2] = leds[3] = 1.0
-
-        elif self.state == 'REVERSING':
+        if self.state == 'REVERSING':
             leds[4] = 1.0  # brake
-
-        elif self.state == 'SLOWING':
-            leds[0] = leds[1] = 1.0  # hazard
+        elif self.state in ('MANUAL_FWD', 'MANUAL_REV'):
+            leds[0] = leds[1] = 1.0  # hazard = manual mode indicator
+            leds[2] = leds[3] = 1.0
+            if self.state == 'MANUAL_REV':
+                leds[4] = 1.0
+        elif avoid_side == 'LEFT':
+            leds[0] = leds[1] = 1.0
+        elif avoid_side == 'RIGHT':
             leds[2] = leds[3] = 1.0
 
         return leds

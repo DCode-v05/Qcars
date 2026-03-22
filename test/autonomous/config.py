@@ -138,10 +138,8 @@ LOOP_RATE_HZ       = 30
 LOOP_DT            = 1.0 / LOOP_RATE_HZ
 WARMUP_S           = 2.0
 
-# State machine
-PERSON_PAUSE_S     = 1.5        # brief pause for person (was 8s — too long)
-REVERSE_TIMEOUT_S  = 1.5        # reverse duration
-STUCK_RETRY_S      = 1.0        # retry quickly (was 3s)
+# Navigator (no timers — car never stops on its own)
+PERSON_SLOW_S      = 1.0        # slow near person for 1s then resume
 
 # Dashboard
 DASHBOARD_PORT     = 5000
