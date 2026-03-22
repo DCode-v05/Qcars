@@ -39,8 +39,8 @@ from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 FRAME_WIDTH    = 820
-FRAME_HEIGHT   = 616
-FRAME_RATE     = 15.0          # reduced from 30 — fewer frames = less ISP pressure
+FRAME_HEIGHT   = 410
+FRAME_RATE     = 30.0           # 820x410 is a proven IMX219 mode (Mode 3)
 YOLO_WIDTH     = 640
 JPEG_QUALITY   = 75
 CONF_THRESH    = 0.40
@@ -149,9 +149,15 @@ class ISPScheduler:
             )
             cap.start()
         except Exception as ex:
-            self._fail[self.cam_ids.index(cam_id)] += 1
-            if self._fail[self.cam_ids.index(cam_id)] % 20 == 1:
-                logging.error(f"[ISP] cannot open cam {cam_id}: {ex}")
+            idx = self.cam_ids.index(cam_id)
+            self._fail[idx] += 1
+            if self._fail[idx] <= 3:
+                msg = str(ex)
+                try:
+                    msg = ex.get_error_message()
+                except Exception:
+                    pass
+                logging.error(f"[ISP] cannot open cam {cam_id}: {msg}")
             return
 
         idx = self.cam_ids.index(cam_id)
