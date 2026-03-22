@@ -46,8 +46,46 @@ class Dashboard:
     def __init__(self, stores):
         self._stores = stores
         self._app = Flask(__name__)
+        self._lidar_data = None     # set by main loop
+        self._nav_data = None       # set by main loop
+        self._det_data = []         # set by main loop
+        self._data_lock = threading.Lock()
         self._setup_routes()
         self._thread = None
+
+    def update_lidar(self, distances, angles, valid):
+        """Called from main loop to push LiDAR data."""
+        with self._data_lock:
+            pts = []
+            for i in range(len(distances)):
+                if valid[i] and distances[i] < cfg.LIDAR_MAX_M:
+                    pts.append({'d': round(float(distances[i]), 3),
+                                'a': round(float(angles[i]), 4)})
+            self._lidar_data = pts
+
+    def update_nav(self, detection, nav_result):
+        """Called from main loop to push navigation state."""
+        with self._data_lock:
+            self._nav_data = {
+                'zone': detection['zone'],
+                'behaviour': detection['behaviour'],
+                'distance_m': detection['distance_m'],
+                'rear_min_m': detection['rear_min_m'],
+                'has_path': detection['has_path'],
+                'best_path_angle': round(detection['best_path_angle'], 4),
+                'best_gap_width': round(detection['best_gap_width'], 1),
+                'drive_forward': detection['drive_forward'],
+                'obstacle_type': detection['obstacle_type'],
+                'state': nav_result['state'],
+                'throttle': nav_result['throttle'],
+                'steering': round(nav_result['steering'], 4),
+            }
+
+    def update_detections(self, dets):
+        """Called from main loop to push YOLO detections."""
+        with self._data_lock:
+            self._det_data = [d.to_dict() if hasattr(d, 'to_dict') else d
+                              for d in dets]
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -98,6 +136,24 @@ class Dashboard:
                 return "encode error", 500
             return Response(data, mimetype="image/jpeg",
                             headers={"Cache-Control": "no-store"})
+
+        @app.route("/lidar")
+        def lidar():
+            with self._data_lock:
+                pts = self._lidar_data or []
+            return jsonify(points=pts, ts=time.time())
+
+        @app.route("/nav")
+        def nav():
+            with self._data_lock:
+                nd = self._nav_data or {}
+            return jsonify(**nd, ts=time.time())
+
+        @app.route("/detections")
+        def detections():
+            with self._data_lock:
+                dets = list(self._det_data)
+            return jsonify(detections=dets, ts=time.time())
 
         @app.route("/healthz")
         def health():
