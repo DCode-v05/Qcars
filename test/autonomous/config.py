@@ -5,14 +5,22 @@ Adapted from Final/constants.py + Final/obstacle_detector.py configs.
 import numpy as np
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  VEHICLE HARDWARE
+#  VEHICLE HARDWARE & GEOMETRY
 # ═══════════════════════════════════════════════════════════════════════════════
 WHEEL_RADIUS_M    = 0.033       # 33mm
 WHEEL_BASE_M      = 0.256       # axle-to-axle
+CAR_WIDTH_M       = 0.20        # ~200mm body width
+CAR_LENGTH_M      = 0.40        # ~400mm body length
 GEAR_RATIO        = (13 * 19) / (70 * 37)  # ~0.0948
 ENCODER_CPR       = 720 * 4     # 2880 counts/rev (quadrature)
 TACH_TO_MPS       = GEAR_RATIO * WHEEL_RADIUS_M  # rad/s → m/s
 CPS_TO_MPS        = (1.0 / ENCODER_CPR) * GEAR_RATIO * 2 * np.pi * WHEEL_RADIUS_M
+
+# Turning geometry (Ackermann)
+MAX_STEERING_RAD   = np.radians(30)   # ±30° max steering lock
+MIN_TURN_RADIUS_M  = WHEEL_BASE_M / np.tan(MAX_STEERING_RAD)  # ~0.44m
+CAR_HALF_WIDTH_M   = CAR_WIDTH_M / 2.0 + 0.05  # +5cm safety margin
+OBSTACLE_INFLATE_M = CAR_HALF_WIDTH_M  # inflate obstacles by car half-width
 
 # IMU calibration
 GYRO_BIAS_Z       = 0.024       # rad/s (subtract from raw gyro_z)
@@ -25,7 +33,6 @@ BATTERY_CRIT_V    = 10.0
 #  DRIVING
 # ═══════════════════════════════════════════════════════════════════════════════
 THROTTLE           = 0.10       # always 0.1 (forward and reverse)
-MAX_STEERING_RAD   = np.radians(30)   # ±30°
 MAX_STEER_RATE     = np.radians(60)   # 60°/s max rate of change
 STEERING_GAIN      = 0.8              # steer = gain × angle_error
 
@@ -84,27 +91,35 @@ MOVING_IDS  = {1, 2, 3, 16}     # bicycle, car, motorcycle, dog
 STATIC_IDS  = {24, 25, 26, 28, 56, 57, 58, 59, 60, 62, 63, 64, 72, 73}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  VFH (Vector Field Histogram) PATH PLANNER
+#  VFH (Vector Field Histogram) PATH PLANNER — vehicle-aware
 # ═══════════════════════════════════════════════════════════════════════════════
-VFH_NUM_BINS       = 36         # 360°/36 = 10° per bin
+VFH_NUM_BINS       = 72         # 360°/72 = 5° per bin (finer resolution)
 VFH_BIN_WIDTH_DEG  = 360.0 / VFH_NUM_BINS
-VFH_GAP_THRESH_M   = 0.6       # bins with min_dist > this are "open"
-VFH_MIN_GAP_BINS   = 3         # minimum 30° gap to be usable
+VFH_BIN_WIDTH_RAD  = np.radians(VFH_BIN_WIDTH_DEG)
+VFH_GAP_THRESH_M   = 0.5       # bins with min_dist > this are "open"
 VFH_PLAN_RANGE_M   = 4.0       # ignore LiDAR beyond this for planning
+
+# Minimum passable gap: car must physically fit through
+# At distance d, gap angular width must be > 2*arctan(car_half_width/d)
+VFH_MIN_GAP_BINS   = 6         # minimum 30° gap (6 bins × 5°)
 VFH_GOAL_BIAS      = 2.0       # weight for goal-aligned gaps
+VFH_TURN_PENALTY   = 0.3       # penalty for gaps requiring sharp turns
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  OBSTACLE ZONES (LiDAR forward sector)
+#  OBSTACLE ZONES — 360° sector analysis
 # ═══════════════════════════════════════════════════════════════════════════════
 ZONE_CLEAR_M       = 1.5       # > this = CLEAR
 ZONE_WARN_M        = 0.4       # WARN < dist <= CLEAR
                                 # <= WARN = STOP
-FRONT_SECTOR_DEG   = 40.0      # ±40° from heading
-REAR_SECTOR_DEG    = 40.0      # ±40° from rear
+FRONT_SECTOR_DEG   = 50.0      # ±50° from heading (wider for turning)
+REAR_SECTOR_DEG    = 50.0      # ±50° from rear
+SIDE_SECTOR_DEG    = 30.0      # ±30° from 90°/270° for side clearance
 REAR_CLEAR_M       = 0.5       # rear is clear if min > this
+SIDE_CLEAR_M       = 0.30      # side clearance for safe turning
 
-# YOLO-LiDAR correlation
-YOLO_CORR_ANGLE    = 12.0      # ±12° matching window
+# YOLO-LiDAR fusion
+YOLO_CORR_ANGLE    = 15.0      # ±15° matching window
+YOLO_INJECT_DIST_M = 1.0       # inject YOLO objects as obstacles at this dist
 
 # Smoothing
 SMOOTH_WINDOW      = 3         # rolling average over N readings

@@ -23,8 +23,12 @@ Pipeline per tick:
 import argparse
 import os
 import queue
+import select
 import signal
+import sys
+import termios
 import threading
+import tty
 import time
 import logging
 
@@ -46,6 +50,25 @@ def _signal_handler(signum, frame):
     print(f"\n[main] Signal {signum} — shutting down...")
 
 
+def _key_listener():
+    """Background thread: sets _shutdown when 'q' is pressed."""
+    global _shutdown
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        while not _shutdown:
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                ch = sys.stdin.read(1)
+                if ch.lower() == 'q':
+                    _shutdown = True
+                    print("\n[main] 'q' pressed — shutting down...")
+                    break
+    except Exception:
+        pass
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+
 def main():
     global _shutdown
 
@@ -55,8 +78,8 @@ def main():
     ap = argparse.ArgumentParser(description="QCar 2 Autonomous Driving")
     ap.add_argument("--model", default="yolov8n.pt",
                     help="YOLO model path (default: yolov8n.pt)")
-    ap.add_argument("--timeout", type=float, default=cfg.RUN_TIMEOUT_S,
-                    help=f"Run timeout in seconds (default: {cfg.RUN_TIMEOUT_S})")
+    ap.add_argument("--timeout", type=float, default=0,
+                    help="Optional timeout in seconds (0=run until 'q')")
     ap.add_argument("--no-yolo", action="store_true",
                     help="Disable YOLO (LiDAR-only obstacle avoidance)")
     ap.add_argument("--dashboard", action="store_true",
@@ -122,14 +145,17 @@ def main():
     last_print = 0.0
     tick_count = 0
 
-    print(f"\n[main] Running. Ctrl+C to stop.\n")
+    # Start 'q' key listener
+    threading.Thread(target=_key_listener, daemon=True, name="keylistener").start()
+
+    print(f"\n[main] Running. Press 'q' to stop.\n")
 
     try:
         while not _shutdown:
             tick_start = time.perf_counter()
             elapsed    = tick_start - start_t
 
-            if elapsed >= args.timeout:
+            if args.timeout > 0 and elapsed >= args.timeout:
                 print(f"\n[main] Timeout after {elapsed:.1f}s.")
                 break
 
