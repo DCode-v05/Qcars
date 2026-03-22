@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-QCar 2 — 360° Perception Server  v5  (Quanser VideoCapture)
+QCar 2 — 360 Perception Server  v6  (PAL QCarCameras)
 
-Uses quanser.multimedia.VideoCapture to access CSI cameras via
-nvargus-daemon, since OpenCV is compiled without GStreamer and
-cv2.VideoCapture cannot open CSI cameras by index on Jetson.
+Uses pal.products.qcar.QCarCameras (same as Final/) to access CSI cameras.
+QCarCameras wraps Camera2D which handles VideoCapture lifecycle correctly.
 
 Architecture
 ------------
-  ISPScheduler (1 thread)
-    └─ round-robin: cap0.read() → cap1.read() → cap2.read() → cap3.read()
-    └─ puts frames into per-camera queues
+  CameraReader (1 thread)
+    └─ calls cameras.readAll() in a loop
+    └─ copies each frame into per-camera queues
 
-  YOLOWorker × 4 (4 threads)
+  YOLOWorker x N (threads)
     └─ pulls from camera queue → runs inference → updates annotated frame
 
-  Flask MJPEG streams
-    └─ always send last annotated frame (never block)
+  Flask snapshot endpoints (no persistent MJPEG connections)
+    └─ /snapshot/N returns a single JPEG per request
 """
 
 import argparse
@@ -33,8 +32,7 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify
 from flask_socketio import SocketIO
-from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
-from quanser.multimedia.exceptions import MediaError
+from pal.products.qcar import QCarCameras
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -42,20 +40,10 @@ from quanser.multimedia.exceptions import MediaError
 YOLO_WIDTH     = 640
 JPEG_QUALITY   = 75
 CONF_THRESH    = 0.40
-STREAM_FPS     = 8.0           # MJPEG push rate to browser
-CAM_STAGGER_S  = 0.10          # delay between cameras (let ISP settle)
-ISP_GRAB_DELAY = 0.04          # delay between sequential grabs (40ms)
-
-# Resolution candidates — tried in order until one works per camera
-# IMX219 modes first, then AR0144 / common V4L2 modes
-VIDEO_MODES = [
-    (820, 410, 120.0),   # IMX219 Mode 3 — confirmed working on QCar 2
-    (820, 616, 60.0),    # IMX219 Mode 4
-    (640, 480, 30.0),    # universal fallback
-    (1280, 720, 60.0),   # common HD
-    (1640, 820, 30.0),   # IMX219 half-res
-    (1640, 1232, 30.0),  # IMX219 full-ish
-]
+CSI_WIDTH      = 820
+CSI_HEIGHT     = 410
+CSI_FPS        = 30             # matches Final/perception.py — PAL default
+READ_DELAY     = 0.033          # ~30fps read rate
 
 CAMERA_CONFIG = [
     {"id": 0, "name": "RIGHT", "centre_deg":  90.0},
@@ -106,186 +94,92 @@ def box_angles(bx, by, bw, bh, fw, centre):
             world_ang(centre, px_to_offset(bx + bw/2., fw)))
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ISP Scheduler  —  THE KEY FIX
-# One thread, sequential round-robin reads, stagger between cameras
+# Camera Reader — uses PAL QCarCameras (same approach as Final/perception.py)
+# Cameras are opened ONCE on the main thread, then read continuously.
 # ══════════════════════════════════════════════════════════════════════════════
-class ISPScheduler:
+class CameraReader:
     """
-    Grabs frames from all 4 CSI cameras via quanser.multimedia.VideoCapture.
-
-    Only ONE camera is open at any given time (Jetson ISP limitation).
-    Cycle: open cam → read several frames → stop/close → next cam.
+    Reads all 4 CSI cameras using QCarCameras (PAL layer).
+    Cameras are initialized on the main thread via open().
+    A background thread calls readAll() and pushes frames to queues.
     """
 
-    READS_PER_CAM = 5   # frames to read before rotating to next camera
-
-    def __init__(self, cam_ids: List[int], queues: List[queue.Queue]):
-        self.cam_ids   = cam_ids
+    def __init__(self, queues: List[queue.Queue]):
         self.queues    = queues
+        self._cameras: Optional[QCarCameras] = None
         self._running  = False
         self._thread: Optional[threading.Thread] = None
-        self._good     = [0] * len(cam_ids)
-        self._fail     = [0] * len(cam_ids)
-        self._modes: List[Optional[tuple]] = [None] * len(cam_ids)
-        self._bufs: List[Optional[np.ndarray]] = [None] * len(cam_ids)
+        self._good     = [0] * 4
+        self._fail     = [0] * 4
+
+    def open(self):
+        """Open cameras on the MAIN thread (required by PAL/nvargus)."""
+        logging.info("[CAM] Opening QCarCameras (820x410 @ 30fps, all 4 enabled)...")
+        self._cameras = QCarCameras(
+            frameWidth=CSI_WIDTH,
+            frameHeight=CSI_HEIGHT,
+            frameRate=CSI_FPS,
+            enableRight=True,
+            enableBack=True,
+            enableFront=True,
+            enableLeft=True,
+        )
+        # Warmup: discard first few frames (ISP pipeline fill)
+        logging.info("[CAM] Warming up cameras...")
+        for _ in range(30):
+            self._cameras.readAll()
+            time.sleep(READ_DELAY)
+        logging.info("[CAM] Cameras ready.")
 
     def start(self):
+        """Start background reader thread."""
+        if self._cameras is None:
+            raise RuntimeError("Call open() before start()")
         self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True,
-                                         name="isp_sched")
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="cam_reader")
         self._thread.start()
 
     def stop(self):
         self._running = False
 
+    def terminate(self):
+        """Close all cameras."""
+        if self._cameras:
+            try:
+                self._cameras.terminate()
+            except Exception as e:
+                logging.warning(f"[CAM] terminate error: {e}")
+
     def stats(self):
         return list(zip(self._good, self._fail))
 
-    def get_mode(self, idx):
-        return self._modes[idx]
-
-    # ── internal ──────────────────────────────────────────────────────────────
-    def _try_open(self, cam_id, w, h, fps):
-        """Open a camera using two-step pattern. Returns cap or None."""
-        url = f"video://localhost:{cam_id}"
-        cap = VideoCapture()
-        try:
-            cap.open(url, fps, w, h,
-                     ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
-                     ImageDataType.UINT8, [], 0)
-            cap.start()
-            return cap
-        except MediaError as me:
-            logging.warning(f"[ISP] cam {cam_id} open({w}x{h}@{fps}) "
-                            f"failed: {me.get_error_message()}")
-        except Exception as ex:
-            logging.warning(f"[ISP] cam {cam_id} open({w}x{h}@{fps}) "
-                            f"failed: {ex}")
-        try:
-            cap.close()
-        except Exception:
-            pass
-        return None
-
-    def _close_cap(self, cap):
-        if cap is None:
-            return
-        try:
-            cap.stop()
-        except Exception:
-            pass
-        try:
-            cap.close()
-        except Exception:
-            pass
-
-    def _wait_first_frame(self, cap, buf):
-        """Poll read() until a frame arrives (up to 1s)."""
-        for _ in range(100):
-            try:
-                if cap.read(buf):
-                    return True
-            except Exception:
-                return False
-            time.sleep(0.01)
-        return False
-
-    def _probe_camera(self, cam_id: int, idx: int):
-        """Try each VIDEO_MODE until one works. Closes cap after probe."""
-        for attempt in range(3):
-            for w, h, fps in VIDEO_MODES:
-                if not self._running:
-                    return
-                cap = self._try_open(cam_id, w, h, fps)
-                if cap is None:
-                    time.sleep(0.05)
-                    continue
-                test_buf = np.zeros((h, w, 3), dtype=np.uint8)
-                got = self._wait_first_frame(cap, test_buf)
-                self._close_cap(cap)
-                if got:
-                    self._modes[idx] = (w, h, fps)
-                    self._bufs[idx]  = np.zeros((h, w, 3), dtype=np.uint8)
-                    logging.info(f"[ISP] cam {cam_id} probed OK: {w}x{h} @ {fps}fps")
-                    return
-                else:
-                    logging.warning(f"[ISP] cam {cam_id} opened {w}x{h}@{fps} "
-                                    f"but read failed")
-            if attempt < 2:
-                logging.warning(f"[ISP] cam {cam_id}: attempt {attempt+1} failed, "
-                                f"retrying in 1s...")
-                time.sleep(1.0)
-        logging.error(f"[ISP] cam {cam_id}: ALL video modes failed after 3 attempts!")
-
-    def _grab_camera(self, cam_id: int, idx: int, q: queue.Queue):
-        """Open one camera, read several frames, close it, push last to queue."""
-        mode = self._modes[idx]
-        if mode is None:
-            return
-        w, h, fps = mode
-        buf = self._bufs[idx]
-
-        cap = self._try_open(cam_id, w, h, fps)
-        if cap is None:
-            self._fail[idx] += 1
-            logging.warning(f"[ISP] cam {cam_id} grab: open failed")
-            return
-
-        got_any = False
-        try:
-            # Wait for first frame (ISP warmup)
-            if not self._wait_first_frame(cap, buf):
-                self._fail[idx] += 1
-                logging.warning(f"[ISP] cam {cam_id} grab: warmup read failed")
-                return
-            got_any = True
-            self._good[idx] += 1
-
-            # Read additional frames to get the freshest one
-            for _ in range(self.READS_PER_CAM - 1):
-                if not self._running:
-                    break
-                try:
-                    if cap.read(buf):
-                        self._good[idx] += 1
-                    else:
-                        self._fail[idx] += 1
-                except Exception:
-                    self._fail[idx] += 1
-        finally:
-            self._close_cap(cap)
-
-        if got_any:
-            frame = buf.copy()
-            if q.full():
-                try: q.get_nowait()
-                except queue.Empty: pass
-            try: q.put_nowait(frame)
-            except queue.Full: pass
-            logging.info(f"[ISP] cam {cam_id} grabbed frame "
-                         f"({self._good[idx]}g/{self._fail[idx]}f)")
-
     def _loop(self):
-        n = len(self.cam_ids)
-
-        # Phase 1: probe each camera (one at a time, close after each)
-        logging.info(f"[ISP] probing {n} cameras for supported video modes...")
-        for i, cam_id in enumerate(self.cam_ids):
-            if not self._running:
-                return
-            self._probe_camera(cam_id, i)
-            time.sleep(CAM_STAGGER_S)
-
-        resolved = sum(1 for m in self._modes if m is not None)
-        logging.info(f"[ISP] {resolved}/{n} cameras resolved, starting capture loop")
-
-        # Phase 2: round-robin — open ONE camera, grab frames, close, next
-        idx = 0
+        logging.info("[CAM] Reader thread started.")
         while self._running:
-            if self._modes[idx] is not None:
-                self._grab_camera(self.cam_ids[idx], idx, self.queues[idx])
-                time.sleep(CAM_STAGGER_S)  # let ISP settle between cameras
-            idx = (idx + 1) % n
+            try:
+                flags = self._cameras.readAll()
+            except Exception as ex:
+                logging.error(f"[CAM] readAll error: {ex}")
+                time.sleep(0.1)
+                continue
+
+            for i, cam in enumerate(self._cameras.csi):
+                if cam is None:
+                    continue
+                frame = cam.imageData.copy()
+                if frame.max() > 0:  # valid frame (not all-black)
+                    self._good[i] += 1
+                    q = self.queues[i]
+                    if q.full():
+                        try: q.get_nowait()
+                        except queue.Empty: pass
+                    try: q.put_nowait(frame)
+                    except queue.Full: pass
+                else:
+                    self._fail[i] += 1
+
+            time.sleep(READ_DELAY)
 
 
 # Default placeholder size (used before probe completes)
@@ -533,7 +427,7 @@ socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*",
 
 _stores:  List[CamStore]   = []
 _workers: List[YOLOWorker] = []
-_isp:     Optional[ISPScheduler] = None
+_reader:  Optional[CameraReader] = None
 _agg      = Aggregator()
 
 
@@ -578,8 +472,8 @@ def dets_route():
 @app.route("/healthz")
 def health():
     stats=[]
-    if _isp:
-        for (g,f),(cfg) in zip(_isp.stats(), CAMERA_CONFIG):
+    if _reader:
+        for (g,f),(cfg) in zip(_reader.stats(), CAMERA_CONFIG):
             stats.append({"cam":cfg["id"],"name":cfg["name"],"good":g,"fail":f})
     return jsonify(status="ok", cameras=stats, ts=time.time())
 
@@ -615,7 +509,7 @@ def _push():
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
-    global CONF_THRESH, _isp
+    global CONF_THRESH, _reader
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
@@ -631,17 +525,19 @@ def main():
     model_path  = os.path.expandvars(args.model)
 
     print("=" * 62)
-    print("  QCar 2 -- 360 Perception Server  v5")
+    print("  QCar 2 -- 360 Perception Server  v6  (PAL QCarCameras)")
     print("=" * 62)
     print(f"  Model  : {model_path}")
-    print(f"  Mode   : {'DEMO' if args.demo else 'LIVE — quanser.multimedia sequential scheduler'}")
-    print(f"  Modes  : {len(VIDEO_MODES)} candidates (auto-probe per camera)")
-    print(f"  Stream : {STREAM_FPS}fps   Conf: {CONF_THRESH}")
+    print(f"  Mode   : {'DEMO' if args.demo else 'LIVE — PAL QCarCameras'}")
+    print(f"  Camera : {CSI_WIDTH}x{CSI_HEIGHT} @ {CSI_FPS}fps")
+    print(f"  Conf   : {CONF_THRESH}")
     print("-" * 62)
 
     def _bye(sig, frame):
         print("\n[INFO] Shutting down ...")
-        if _isp: _isp.stop()
+        if _reader:
+            _reader.stop()
+            _reader.terminate()
         for w in _workers: w.stop()
         time.sleep(0.5)
         os._exit(0)
@@ -649,22 +545,22 @@ def main():
     signal.signal(signal.SIGINT,  _bye)
     signal.signal(signal.SIGTERM, _bye)
 
-    # Create per-camera frame stores and ISP queues
-    isp_queues = [queue.Queue(maxsize=2) for _ in CAMERA_CONFIG]
+    # Create per-camera frame stores and queues
+    cam_queues = [queue.Queue(maxsize=2) for _ in CAMERA_CONFIG]
     for cfg in CAMERA_CONFIG:
         _stores.append(CamStore(cfg["id"]))
 
     if not args.demo:
-        # Quick sanity check: try opening cam 0 on the main thread first
-        # Start ISP scheduler (one camera open at a time, round-robin)
-        _isp = ISPScheduler([cfg["id"] for cfg in CAMERA_CONFIG], isp_queues)
-        _isp.start()
-        print("  ISP scheduler started (open-read-close, 1 camera at a time)")
+        # Open cameras on MAIN thread (required by PAL/nvargus)
+        _reader = CameraReader(cam_queues)
+        _reader.open()
+        _reader.start()
+        print("  Camera reader started (PAL QCarCameras, all 4 enabled)")
     else:
-        print("  Demo mode — ISP scheduler not used")
+        print("  Demo mode -- cameras not used")
 
     # Start YOLO workers
-    for cfg, store, q in zip(CAMERA_CONFIG, _stores, isp_queues):
+    for cfg, store, q in zip(CAMERA_CONFIG, _stores, cam_queues):
         w = YOLOWorker(cfg, model_path, store, q,
                        use_engine=args.engine, use_demo=args.demo)
         w.start()
@@ -675,10 +571,9 @@ def main():
 
     ip = "10.1.77.73"
     print(f"\n  Dashboard  -> http://{ip}:{args.port}")
-    print(f"  Health     -> http://{ip}:{args.port}/healthz   <- check cam frame counts")
-    print(f"  Raw cam 0  -> http://{ip}:{args.port}/raw/0     <- no YOLO overlay")
-    print(f"  CAM 0-3    -> http://{ip}:{args.port}/video/0")
-    print(f"  Panorama   -> http://{ip}:{args.port}/video/panorama")
+    print(f"  Health     -> http://{ip}:{args.port}/healthz")
+    print(f"  Snapshots  -> http://{ip}:{args.port}/snapshot/0..3")
+    print(f"  Panorama   -> http://{ip}:{args.port}/snapshot/panorama")
     print(f"  JSON API   -> http://{ip}:{args.port}/detections")
     print("=" * 62)
     print("  Ctrl+C to stop\n")
