@@ -364,7 +364,7 @@
 
 <!-- RADAR -->
 <div id="radar-panel">
-  <h2>RADAR · BIRD'S EYE · 360°</h2>
+  <h2>QCAR BIRD'S EYE · 360°</h2>
   <canvas id="radar-canvas" width="300" height="300"></canvas>
   <div id="compass-legend"></div>
 </div>
@@ -434,7 +434,7 @@ function tickFPS() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RADAR CANVAS
+// BIRD'S EYE CANVAS — LiDAR + YOLO + best path
 // ═══════════════════════════════════════════════════════════════
 const RC     = document.getElementById("radar-canvas");
 const RCX    = RC.getContext("2d");
@@ -442,27 +442,43 @@ const R_SIZE = RC.width;
 const R_CX   = R_SIZE / 2;
 const R_CY   = R_SIZE / 2;
 const R_RMAX = R_SIZE / 2 - 10;
+const LIDAR_MAX_M = 4.0;  // max range for scaling
 
 let _detections = [];
-let _radarAngle = 0;   // sweep
+let _lidarPts   = [];     // [{d, a}, ...]
+let _navData    = {};     // best path, zone, state
 
-function drawRadar(dets) {
+function drawBirdEye() {
   const ctx = RCX;
   ctx.clearRect(0, 0, R_SIZE, R_SIZE);
 
-  // Background circles
+  // ── Range rings with distance labels ──
   ctx.strokeStyle = "#1a2a1a";
   ctx.lineWidth = 1;
+  ctx.font = "8px 'Share Tech Mono'";
+  ctx.fillStyle = "#2a4a2a";
   for (let r = 1; r <= 4; r++) {
+    const rr = R_RMAX * r / 4;
     ctx.beginPath();
-    ctx.arc(R_CX, R_CY, R_RMAX * r / 4, 0, Math.PI * 2);
+    ctx.arc(R_CX, R_CY, rr, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.fillText((r * LIDAR_MAX_M / 4).toFixed(1) + "m", R_CX + 3, R_CY - rr + 10);
   }
 
-  // Cardinal spokes
-  const cardinals = ["N(0°)", "E(90°)", "S(180°)", "W(270°)"];
+  // ── Cardinal labels ──
+  const labels = ["FRONT", "RIGHT", "BACK", "LEFT"];
   ctx.font = "9px 'Share Tech Mono'";
-  ctx.fillStyle = "#2a4a2a";
+  ctx.fillStyle = "#3a7a3a";
+  ctx.textAlign = "center";
+  ctx.fillText(labels[0], R_CX, R_CY - R_RMAX - 2);
+  ctx.fillText(labels[2], R_CX, R_CY + R_RMAX + 10);
+  ctx.textAlign = "left";
+  ctx.fillText(labels[1], R_CX + R_RMAX + 3, R_CY + 4);
+  ctx.textAlign = "right";
+  ctx.fillText(labels[3], R_CX - R_RMAX - 3, R_CY + 4);
+  ctx.textAlign = "left";
+
+  // ── Cardinal spokes ──
   for (let i = 0; i < 4; i++) {
     const a = (i * 90 - 90) * Math.PI / 180;
     ctx.beginPath();
@@ -471,84 +487,108 @@ function drawRadar(dets) {
     ctx.strokeStyle = "#1a3a1a";
     ctx.lineWidth = 1;
     ctx.stroke();
-    ctx.fillStyle = "#3a6a3a";
-    ctx.fillText(cardinals[i],
-      R_CX + Math.cos(a) * (R_RMAX + 2) - 14,
-      R_CY + Math.sin(a) * (R_RMAX + 2) + 4);
   }
 
-  // Camera FOV arcs
-  const camColours = ["#00ff8830","#00e5ff30","#ffaa0030","#ff334430"];
-  for (let i = 0; i < 4; i++) {
-    const centre = CAM_CENTRES[i];
-    const start  = (centre - H_FOV / 2 - 90) * Math.PI / 180;
-    const end    = (centre + H_FOV / 2 - 90) * Math.PI / 180;
-    ctx.beginPath();
-    ctx.moveTo(R_CX, R_CY);
-    ctx.arc(R_CX, R_CY, R_RMAX, start, end);
-    ctx.closePath();
-    ctx.fillStyle = camColours[i];
-    ctx.fill();
-    ctx.strokeStyle = camColours[i].replace("30", "80");
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-
-  // Sweep line
-  const sA = (_radarAngle - 90) * Math.PI / 180;
-  const grad = ctx.createLinearGradient(R_CX, R_CY,
-    R_CX + Math.cos(sA) * R_RMAX,
-    R_CY + Math.sin(sA) * R_RMAX);
-  grad.addColorStop(0,   "rgba(0,255,136,0)");
-  grad.addColorStop(1,   "rgba(0,255,136,0.8)");
+  // ── Zone rings (STOP=red, WARN=amber, CLEAR=dim) ──
+  const stopR  = (0.4 / LIDAR_MAX_M) * R_RMAX;
+  const warnR  = (1.5 / LIDAR_MAX_M) * R_RMAX;
   ctx.beginPath();
-  ctx.moveTo(R_CX, R_CY);
-  ctx.lineTo(R_CX + Math.cos(sA) * R_RMAX,
-             R_CY + Math.sin(sA) * R_RMAX);
-  ctx.strokeStyle = grad;
-  ctx.lineWidth = 2;
+  ctx.arc(R_CX, R_CY, stopR, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,51,68,0.3)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(R_CX, R_CY, warnR, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,170,0,0.25)";
+  ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Detection arcs
-  for (const d of dets) {
+  // ── LiDAR point cloud (obstacles) ──
+  for (const pt of _lidarPts) {
+    const r = Math.min(pt.d / LIDAR_MAX_M, 1.0) * R_RMAX;
+    const a = pt.a - Math.PI / 2;  // rotate so 0=up
+    const x = R_CX + Math.cos(a) * r;
+    const y = R_CY + Math.sin(a) * r;
+    // Color by distance: red=close, yellow=mid, green=far
+    let col;
+    if (pt.d < 0.4) col = "#ff3344";
+    else if (pt.d < 1.5) col = "#ffaa00";
+    else col = "#00cc66";
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, Math.PI * 2);
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+
+  // ── YOLO detection arcs ──
+  for (const d of _detections) {
     const aL = (d.angle_left  - 90) * Math.PI / 180;
     const aR = (d.angle_right - 90) * Math.PI / 180;
     const col = classColour(d.class_id);
-
-    // Filled arc sector (medium radius)
     ctx.beginPath();
     ctx.moveTo(R_CX, R_CY);
-    ctx.arc(R_CX, R_CY, R_RMAX * 0.55, aL, aR);
+    ctx.arc(R_CX, R_CY, R_RMAX * 0.5, aL, aR);
     ctx.closePath();
-    ctx.fillStyle = col + "44";
+    ctx.fillStyle = col.replace(")", ",0.25)").replace("hsl", "hsla");
     ctx.fill();
     ctx.strokeStyle = col;
     ctx.lineWidth = 2;
     ctx.stroke();
-
-    // Label at centre angle
+    // Label
     const aC = (d.angle_centre - 90) * Math.PI / 180;
-    const lx = R_CX + Math.cos(aC) * R_RMAX * 0.65;
-    const ly = R_CY + Math.sin(aC) * R_RMAX * 0.65;
-    ctx.font = "bold 9px 'Share Tech Mono'";
-    ctx.fillStyle = col;
+    const lx = R_CX + Math.cos(aC) * R_RMAX * 0.58;
+    const ly = R_CY + Math.sin(aC) * R_RMAX * 0.58;
+    ctx.font = "bold 8px 'Share Tech Mono'";
     ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    // Background pill
-    const lw = ctx.measureText(d.class_name).width;
+    const tw = ctx.measureText(d.class_name).width;
     ctx.fillStyle = "rgba(8,12,15,0.85)";
-    ctx.fillRect(lx - lw/2 - 3, ly - 7, lw + 6, 14);
+    ctx.fillRect(lx - tw/2 - 2, ly - 6, tw + 4, 12);
     ctx.fillStyle = col;
-    ctx.fillText(d.class_name, lx, ly);
+    ctx.fillText(d.class_name, lx, ly + 1);
     ctx.textAlign = "left";
   }
 
-  // QCar body
+  // ── Best path arrow (thick green/yellow line) ──
+  if (_navData.has_path) {
+    const pa = _navData.best_path_angle - Math.PI / 2;
+    const pathR = R_RMAX * 0.7;
+    const ex = R_CX + Math.cos(pa) * pathR;
+    const ey = R_CY + Math.sin(pa) * pathR;
+    const pathCol = _navData.drive_forward ? "#00ff88" : "#ff6644";
+    // Arrow shaft
+    ctx.beginPath();
+    ctx.moveTo(R_CX, R_CY);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = pathCol;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // Arrowhead
+    const headLen = 12;
+    const headAng = 0.4;
+    ctx.beginPath();
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - headLen * Math.cos(pa - headAng),
+               ey - headLen * Math.sin(pa - headAng));
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - headLen * Math.cos(pa + headAng),
+               ey - headLen * Math.sin(pa + headAng));
+    ctx.strokeStyle = pathCol;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    // Label
+    const dir = _navData.drive_forward ? "FWD" : "REV";
+    ctx.font = "bold 9px 'Share Tech Mono'";
+    ctx.fillStyle = pathCol;
+    ctx.textAlign = "center";
+    ctx.fillText(dir, ex, ey - 8);
+    ctx.textAlign = "left";
+  }
+
+  // ── QCar body ──
   ctx.beginPath();
   ctx.arc(R_CX, R_CY, 8, 0, Math.PI * 2);
   ctx.fillStyle = "#00ff88";
   ctx.fill();
-  // Arrow for front
   ctx.beginPath();
   ctx.moveTo(R_CX, R_CY - 16);
   ctx.lineTo(R_CX - 5, R_CY - 8);
@@ -556,19 +596,34 @@ function drawRadar(dets) {
   ctx.closePath();
   ctx.fillStyle = "#00ff88";
   ctx.fill();
+
+  // ── Status bar at bottom ──
+  if (_navData.state) {
+    const zoneCols = {CLEAR:"#00cc66", WARN:"#ffaa00", STOP:"#ff3344"};
+    ctx.font = "bold 10px 'Share Tech Mono'";
+    ctx.fillStyle = zoneCols[_navData.zone] || "#888";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      `${_navData.state}  ${_navData.zone}  ${_navData.distance_m}m`,
+      R_CX, R_SIZE - 4
+    );
+    ctx.textAlign = "left";
+  }
 }
 
-// Radar sweep animation
-let _lastSweepTs = 0;
-function animateRadar(ts) {
-  const dt = Math.min((ts - _lastSweepTs) / 1000, 0.1);
-  _lastSweepTs = ts;
-  _radarAngle = (_radarAngle + dt * 60) % 360;  // 60°/s
-  drawRadar(_detections);
+// ── Animation loop ──
+function animateBirdEye(ts) {
+  drawBirdEye();
   tickFPS();
-  requestAnimationFrame(animateRadar);
+  requestAnimationFrame(animateBirdEye);
 }
-requestAnimationFrame(animateRadar);
+requestAnimationFrame(animateBirdEye);
+
+// ── Poll LiDAR + nav data ──
+setInterval(() => {
+  fetch("/lidar").then(r => r.json()).then(d => { _lidarPts = d.points || []; }).catch(() => {});
+  fetch("/nav").then(r => r.json()).then(d => { _navData = d; }).catch(() => {});
+}, 200);  // 5Hz
 
 // ═══════════════════════════════════════════════════════════════
 // DETECTION TABLE
@@ -661,6 +716,16 @@ socket.on("detections", (data) => {
   updateTable(dets);
   updateLegend(dets);
 });
+
+// Also poll detections via REST (SocketIO may not be connected)
+setInterval(() => {
+  fetch("/detections").then(r => r.json()).then(d => {
+    const dets = d.detections || [];
+    _detections = dets;
+    updateTable(dets);
+    updateLegend(dets);
+  }).catch(() => {});
+}, 500);
 
 socket.on("disconnect", () => {
   console.warn("[SocketIO] disconnected — will retry automatically");

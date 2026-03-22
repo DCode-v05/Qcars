@@ -173,6 +173,14 @@ def main():
             sensors.write_command(throttle=throttle, steering=steering,
                                  leds=leds)
 
+            # ── 7b. Push data to dashboard ────────────────────────────────
+            if dash:
+                dash.update_lidar(data['lidar_distances'],
+                                  data['lidar_angles'],
+                                  data['lidar_valid'])
+                dash.update_nav(detection, nav_result)
+                dash.update_detections(yolo_dets)
+
             # ── 8. Terminal print every 0.5s ──────────────────────────────
             if elapsed - last_print >= 0.5:
                 zone     = detection['zone']
