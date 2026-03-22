@@ -28,11 +28,13 @@ class Navigator:
         self.state           = 'NAVIGATING'
         self._last_steer     = 0.0
         self._reverse_start  = 0.0
+        self._reverse_end    = 0.0   # cooldown: don't re-enter reverse immediately
         self._slow_start     = 0.0
 
     def reset(self):
         self.state = 'NAVIGATING'
         self._last_steer = 0.0
+        self._reverse_end = 0.0
 
     def update(self, detection, dt):
         zone       = detection['zone']
@@ -47,10 +49,13 @@ class Navigator:
 
         if self.state == 'REVERSING':
             if now - self._reverse_start > cfg.REVERSE_TIMEOUT_S:
-                self.state = 'NAVIGATING'
-            elif not rear_clear:
-                # Rear blocked too — switch to creep forward
+                # After reversing, force CREEPING forward with turn
+                # (don't jump back to REVERSING immediately)
                 self.state = 'CREEPING'
+                self._reverse_end = now
+            elif not rear_clear:
+                self.state = 'CREEPING'
+                self._reverse_end = now
 
         if self.state == 'SLOWING':
             if now - self._slow_start > cfg.PERSON_PAUSE_S:
@@ -59,16 +64,20 @@ class Navigator:
                 self.state = 'NAVIGATING'
 
         # Fresh decisions for non-locked states
+        # Reverse cooldown: after reversing, must creep forward for 1.5s
+        # before allowing another reverse
+        reverse_cooldown = (now - self._reverse_end) < 1.5
+
         if self.state in ('NAVIGATING', 'AVOIDING', 'CREEPING'):
             if behaviour == 'SLOW':
                 self.state = 'SLOWING'
                 self._slow_start = now
-            elif zone == 'STOP' and not drive_fwd and rear_clear:
-                # Front blocked, best path is behind — reverse
+            elif zone == 'STOP' and not drive_fwd and rear_clear and not reverse_cooldown:
+                # Front blocked, path behind, and not in cooldown — reverse
                 self.state = 'REVERSING'
                 self._reverse_start = now
             elif zone == 'STOP':
-                # Very tight — creep through
+                # Very tight OR in reverse cooldown — creep forward with turn
                 self.state = 'CREEPING'
             elif zone == 'WARN':
                 self.state = 'AVOIDING'
