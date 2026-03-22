@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """
-QCar 2 — 360° Perception Server  v4  (ISP scheduler fix)
+QCar 2 — 360° Perception Server  v5  (Quanser VideoCapture)
 
-Root cause of V4L2 timeout with 4 cameras
-------------------------------------------
-The Jetson's ISP (Image Signal Processor) handles all CSI cameras.
-When 4 reader threads all call cap.read() simultaneously, the ISP
-gets flooded with concurrent requests and some time out.
-
-Fix: ONE shared ISP scheduler thread that grabs cameras in round-robin
-order with a short stagger between grabs. Each camera still has its own
-cv2.VideoCapture object, but only ONE read() is active at any moment.
+Uses quanser.multimedia.VideoCapture to access CSI cameras via
+nvargus-daemon, since OpenCV is compiled without GStreamer and
+cv2.VideoCapture cannot open CSI cameras by index on Jetson.
 
 Architecture
 ------------
@@ -39,6 +33,7 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify
 from flask_socketio import SocketIO
+from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -107,14 +102,16 @@ def box_angles(bx, by, bw, bh, fw, centre):
 # ══════════════════════════════════════════════════════════════════════════════
 class ISPScheduler:
     """
-    Opens all 4 cameras sequentially (with stagger) then grabs frames
-    one at a time in round-robin order.  This prevents ISP contention.
+    Opens all 4 CSI cameras via quanser.multimedia.VideoCapture
+    (nvargus-daemon), then grabs frames one at a time in round-robin
+    order.  This prevents ISP contention.
     """
 
     def __init__(self, cam_ids: List[int], queues: List[queue.Queue]):
         self.cam_ids  = cam_ids
         self.queues   = queues          # one Queue per camera
-        self._caps    = []              # cv2.VideoCapture per camera
+        self._caps    = []              # VideoCapture per camera
+        self._bufs    = []              # pre-allocated read buffers
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._good    = [0] * len(cam_ids)
@@ -133,26 +130,47 @@ class ISPScheduler:
         return list(zip(self._good, self._fail))
 
     # ── internal ──────────────────────────────────────────────────────────────
-    def _open_one(self, cam_id: int) -> Optional[cv2.VideoCapture]:
-        cap = cv2.VideoCapture(cam_id)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-        cap.set(cv2.CAP_PROP_FPS,          FRAME_RATE)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        if not cap.isOpened():
-            cap.release()
-            logging.error(f"[ISP] cannot open /dev/video{cam_id}")
+    def _open_one(self, cam_id: int) -> Optional[VideoCapture]:
+        try:
+            url = f"video://localhost:{cam_id}"
+            cap = VideoCapture(
+                url,
+                FRAME_RATE,
+                FRAME_WIDTH,
+                FRAME_HEIGHT,
+                ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+                ImageDataType.UINT8,
+                None,
+                0
+            )
+            cap.start()
+            logging.info(f"[ISP] cam {cam_id} opened via quanser ({url})  "
+                         f"{FRAME_WIDTH}x{FRAME_HEIGHT}")
+            return cap
+        except Exception as ex:
+            logging.error(f"[ISP] cannot open cam {cam_id}: {ex}")
             return None
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        logging.info(f"[ISP] /dev/video{cam_id} opened  {w}x{h}")
-        return cap
+
+    def _close_one(self, cap: Optional[VideoCapture]):
+        if cap is None:
+            return
+        try:
+            cap.stop()
+        except Exception:
+            pass
+        try:
+            cap.close()
+        except Exception:
+            pass
 
     def _loop(self):
         # Open cameras ONE AT A TIME with stagger
         for i, cam_id in enumerate(self.cam_ids):
             cap = self._open_one(cam_id)
             self._caps.append(cap)
+            # Pre-allocate read buffer for this camera
+            self._bufs.append(
+                np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8))
             if i < len(self.cam_ids) - 1:
                 time.sleep(CAM_STAGGER_S)   # let ISP settle between opens
 
@@ -162,6 +180,7 @@ class ISPScheduler:
         while self._running:
             cap = self._caps[idx]
             q   = self.queues[idx]
+            buf = self._bufs[idx]
 
             if cap is None:
                 # Try to reopen
@@ -170,17 +189,23 @@ class ISPScheduler:
                 time.sleep(0.5)
                 continue
 
-            ret, frame = cap.read()
+            try:
+                got = cap.read(buf)
+            except Exception as ex:
+                got = False
+                logging.warning(f"[ISP] cam{self.cam_ids[idx]} read exception: {ex}")
 
-            if not ret or frame is None:
+            if not got:
                 self._fail[idx] += 1
-                logging.warning(f"[ISP] cam{self.cam_ids[idx]} read failed "
-                                f"(total fails: {self._fail[idx]}), reopening")
-                cap.release()
+                if self._fail[idx] % 50 == 1:
+                    logging.warning(f"[ISP] cam{self.cam_ids[idx]} read failed "
+                                    f"(total fails: {self._fail[idx]}), reopening")
+                self._close_one(cap)
                 self._caps[idx] = None
             else:
                 self._good[idx] += 1
-                # Discard oldest if queue full (keep latency low)
+                # buf is BGR numpy array — put a copy into the queue
+                frame = buf.copy()
                 if q.full():
                     try: q.get_nowait()
                     except queue.Empty: pass
@@ -188,11 +213,10 @@ class ISPScheduler:
                 except queue.Full: pass
 
             idx = (idx + 1) % n
-            # Small sleep between grabs — prevents ISP overload
             time.sleep(ISP_GRAB_DELAY)
 
         for cap in self._caps:
-            if cap: cap.release()
+            self._close_one(cap)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -531,10 +555,10 @@ def main():
     model_path  = os.path.expandvars(args.model)
 
     print("=" * 62)
-    print("  QCar 2 -- 360 Perception Server  v4")
+    print("  QCar 2 -- 360 Perception Server  v5")
     print("=" * 62)
     print(f"  Model  : {model_path}")
-    print(f"  Mode   : {'DEMO' if args.demo else 'LIVE — ISP sequential scheduler'}")
+    print(f"  Mode   : {'DEMO' if args.demo else 'LIVE — quanser.multimedia sequential scheduler'}")
     print(f"  Frame  : {FRAME_WIDTH}x{FRAME_HEIGHT}  Capture: {FRAME_RATE}fps")
     print(f"  Stream : {STREAM_FPS}fps   Conf: {CONF_THRESH}")
     print("-" * 62)
