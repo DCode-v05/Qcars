@@ -337,25 +337,25 @@
 <!-- CAMERA GRID -->
 <div id="cam-grid">
   <div class="cam-cell" id="cell-0">
-    <img id="cam0" src="/video/0" alt="CAM 0">
+    <img id="cam0" alt="CAM 0">
     <div class="cam-label">RIGHT · 90°</div>
     <div class="cam-fov">10° ↔ 170°</div>
     <div class="cam-det-count" id="cnt0">0</div>
   </div>
   <div class="cam-cell" id="cell-1">
-    <img id="cam1" src="/video/1" alt="CAM 1">
+    <img id="cam1" alt="CAM 1">
     <div class="cam-label">BACK · 180°</div>
     <div class="cam-fov">100° ↔ 260°</div>
     <div class="cam-det-count" id="cnt1">0</div>
   </div>
   <div class="cam-cell" id="cell-2">
-    <img id="cam2" src="/video/2" alt="CAM 2">
+    <img id="cam2" alt="CAM 2">
     <div class="cam-label">FRONT · 0°</div>
     <div class="cam-fov">−80° ↔ +80°</div>
     <div class="cam-det-count" id="cnt2">0</div>
   </div>
   <div class="cam-cell" id="cell-3">
-    <img id="cam3" src="/video/3" alt="CAM 3">
+    <img id="cam3" alt="CAM 3">
     <div class="cam-label">LEFT · 270°</div>
     <div class="cam-fov">190° ↔ 350°</div>
     <div class="cam-det-count" id="cnt3">0</div>
@@ -372,7 +372,7 @@
 <!-- PANORAMA STRIP -->
 <div id="pano-panel">
   <h3>PANORAMA STRIP · RIGHT → BACK → FRONT → LEFT</h3>
-  <img id="pano-img" src="/video/panorama" alt="panorama">
+  <img id="pano-img" alt="panorama">
 </div>
 
 <!-- DETECTION TABLE -->
@@ -667,22 +667,25 @@ socket.on("disconnect", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// MJPEG stream reconnect on error (exponential back-off)
+// Snapshot polling (replaces MJPEG — no persistent connections)
 // ═══════════════════════════════════════════════════════════════
-function watchMjpeg(img, src) {
-  let backoff = 1000;
-  img.onerror = () => {
-    const delay = Math.min(backoff, 8000);
-    backoff = Math.min(backoff * 1.5, 8000);
-    setTimeout(() => { img.src = src + "?t=" + Date.now(); }, delay);
-  };
-  img.onload = () => { backoff = 1000; };  // reset on success
+const POLL_MS = 125;  // ~8 fps
+
+function pollSnapshot(img, url) {
+  let busy = false;
+  setInterval(() => {
+    if (busy) return;
+    busy = true;
+    const tmp = new Image();
+    tmp.onload = () => { img.src = tmp.src; busy = false; };
+    tmp.onerror = () => { busy = false; };
+    tmp.src = url + "?t=" + Date.now();
+  }, POLL_MS);
 }
 [0,1,2,3].forEach(i => {
-  const img = document.getElementById("cam" + i);
-  watchMjpeg(img, `/video/${i}`);
+  pollSnapshot(document.getElementById("cam" + i), `/snapshot/${i}`);
 });
-watchMjpeg(document.getElementById("pano-img"), "/video/panorama");
+pollSnapshot(document.getElementById("pano-img"), "/snapshot/panorama");
 </script>
 </body>
 </html>

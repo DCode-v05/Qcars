@@ -535,43 +535,39 @@ _stores:  List[CamStore]   = []
 _workers: List[YOLOWorker] = []
 _isp:     Optional[ISPScheduler] = None
 _agg      = Aggregator()
-_SI       = 1.0 / STREAM_FPS
 
 
 def _enc(frame):
     ok,buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return buf.tobytes() if ok else None
 
-def _stream(fn):
-    while True:
-        t0=time.time(); data=_enc(fn())
-        if data:
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"+data+b"\r\n"
-        rem=_SI-(time.time()-t0)
-        if rem>0: time.sleep(rem)
 
-
-@app.route("/video/<int:cid>")
-def vid(cid):
+@app.route("/snapshot/<int:cid>")
+def snapshot(cid):
     if cid<0 or cid>=len(_stores): return "not found",404
-    s=_stores[cid]
-    return Response(_stream(s.get_annotated),
-                    mimetype="multipart/x-mixed-replace; boundary=frame")
+    data = _enc(_stores[cid].get_annotated())
+    if not data: return "encode error",500
+    return Response(data, mimetype="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+@app.route("/snapshot/panorama")
+def snapshot_pano():
+    if not _stores:
+        f = np.zeros((180,820,3),dtype=np.uint8)
+    else:
+        f = panorama([s.get_annotated() for s in _stores])
+    data = _enc(f)
+    if not data: return "encode error",500
+    return Response(data, mimetype="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
 
 @app.route("/raw/<int:cid>")
-def raw_vid(cid):
+def raw_snap(cid):
     if cid<0 or cid>=len(_stores): return "not found",404
-    s=_stores[cid]
-    return Response(_stream(s.get_raw),
-                    mimetype="multipart/x-mixed-replace; boundary=frame")
-
-@app.route("/video/panorama")
-def vid_pano():
-    def _p():
-        if not _stores: return np.zeros((180,820,3),dtype=np.uint8)
-        return panorama([s.get_annotated() for s in _stores])
-    return Response(_stream(_p),
-                    mimetype="multipart/x-mixed-replace; boundary=frame")
+    data = _enc(_stores[cid].get_raw())
+    if not data: return "encode error",500
+    return Response(data, mimetype="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
 
 @app.route("/detections")
 def dets_route():
