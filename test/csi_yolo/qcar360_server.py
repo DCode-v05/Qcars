@@ -198,12 +198,15 @@ class ISPScheduler:
                 if cap is None:
                     time.sleep(0.05)
                     continue
-                # Skip first warmup frame, then test-read
+                # Poll read() — camera needs warmup after start()
                 test_buf = np.zeros((h, w, 3), dtype=np.uint8)
                 got = False
                 try:
-                    cap.read(test_buf)          # warmup (often corrupt)
-                    got = cap.read(test_buf)    # real test
+                    for _ in range(100):
+                        got = cap.read(test_buf)
+                        if got:
+                            break
+                        time.sleep(0.01)
                 except Exception:
                     got = False
                 self._close_cap(cap)
@@ -239,7 +242,8 @@ class ISPScheduler:
 
         got_any = False
         try:
-            for _ in range(self.FRAMES_PER_OPEN):
+            # Wait for first frame (camera needs warmup after start)
+            for _ in range(100):
                 if not self._running:
                     break
                 try:
@@ -249,8 +253,23 @@ class ISPScheduler:
                 if got:
                     got_any = True
                     self._good[idx] += 1
-                else:
-                    self._fail[idx] += 1
+                    break
+                time.sleep(0.01)
+            # Read additional frames if warmup succeeded
+            if got_any:
+                for _ in range(self.FRAMES_PER_OPEN - 1):
+                    if not self._running:
+                        break
+                    try:
+                        got = cap.read(buf)
+                    except Exception:
+                        got = False
+                    if got:
+                        self._good[idx] += 1
+                    else:
+                        self._fail[idx] += 1
+            else:
+                self._fail[idx] += 1
         finally:
             self._close_cap(cap)
 
