@@ -67,18 +67,18 @@ class Dashboard:
         """Called from main loop to push navigation state."""
         with self._data_lock:
             self._nav_data = {
-                'zone': detection['zone'],
-                'behaviour': detection['behaviour'],
-                'distance_m': detection['distance_m'],
-                'rear_min_m': detection['rear_min_m'],
-                'has_path': detection['has_path'],
-                'best_path_angle': round(detection['best_path_angle'], 4),
-                'best_gap_width': round(detection['best_gap_width'], 1),
-                'drive_forward': detection['drive_forward'],
-                'obstacle_type': detection['obstacle_type'],
-                'state': nav_result['state'],
-                'throttle': nav_result['throttle'],
-                'steering': round(nav_result['steering'], 4),
+                'zone': str(detection['zone']),
+                'behaviour': str(detection['behaviour']),
+                'distance_m': float(detection['distance_m']),
+                'rear_min_m': float(detection['rear_min_m']),
+                'has_path': bool(detection['has_path']),
+                'best_path_angle': round(float(detection['best_path_angle']), 4),
+                'best_gap_width': round(float(detection['best_gap_width']), 1),
+                'drive_forward': bool(detection['drive_forward']),
+                'obstacle_type': str(detection['obstacle_type']),
+                'state': str(nav_result['state']),
+                'throttle': float(nav_result['throttle']),
+                'steering': round(float(nav_result['steering']), 4),
             }
 
     def update_detections(self, dets):
