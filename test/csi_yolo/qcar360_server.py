@@ -48,11 +48,11 @@ ISP_GRAB_DELAY = 0.04          # delay between sequential grabs (40ms)
 # Resolution candidates — tried in order until one works per camera
 # IMX219 modes first, then AR0144 / common V4L2 modes
 VIDEO_MODES = [
-    (820, 410, 30.0),    # IMX219 Mode 3
-    (820, 616, 30.0),    # IMX219 Mode 4
-    (1280, 720, 30.0),   # AR0144 / common
+    (820, 410, 120.0),   # IMX219 Mode 3 — confirmed working on QCar 2
+    (820, 616, 60.0),    # IMX219 Mode 4
+    (1280, 720, 60.0),   # AR0144 / common
     (1280, 800, 30.0),   # AR0144 native
-    (640, 480, 30.0),    # universal fallback
+    (640, 480, 60.0),    # universal fallback
     (1920, 1080, 30.0),  # IMX219 1080p
     (1640, 1232, 30.0),  # IMX219 full-ish
 ]
@@ -161,7 +161,7 @@ class ISPScheduler:
             cap.start()
             return cap
         except Exception as ex:
-            logging.debug(f"[ISP] cam {cam_id} open {w}x{h} failed: {ex}")
+            logging.warning(f"[ISP] cam {cam_id} open {w}x{h}@{fps} failed: {ex}")
             return None
 
     def _close_cap(self, cap):
@@ -202,7 +202,7 @@ class ISPScheduler:
                     logging.info(f"[ISP] cam {cam_id} probed OK: {w}x{h} @ {fps}fps")
                     return
                 else:
-                    logging.debug(f"[ISP] cam {cam_id} opened {w}x{h} but read failed")
+                    logging.warning(f"[ISP] cam {cam_id} opened {w}x{h}@{fps} but read failed")
             if attempt < 2:
                 logging.warning(f"[ISP] cam {cam_id}: attempt {attempt+1} failed, "
                                 f"retrying in 1s...")
