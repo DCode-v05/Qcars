@@ -49,9 +49,9 @@ CAM_STAGGER_S  = 0.08          # delay between opening each camera (let ISP sett
 ISP_GRAB_DELAY = 0.02          # delay between sequential grabs (20ms)
 
 CAMERA_CONFIG = [
-    {"id": 0, "name": "FRONT", "centre_deg":   0.0},
-    {"id": 1, "name": "RIGHT", "centre_deg":  90.0},
-    {"id": 2, "name": "BACK",  "centre_deg": 180.0},
+    {"id": 0, "name": "RIGHT", "centre_deg":  90.0},
+    {"id": 1, "name": "BACK",  "centre_deg": 180.0},
+    {"id": 2, "name": "FRONT", "centre_deg":   0.0},
     {"id": 3, "name": "LEFT",  "centre_deg": 270.0},
 ]
 
@@ -102,16 +102,18 @@ def box_angles(bx, by, bw, bh, fw, centre):
 # ══════════════════════════════════════════════════════════════════════════════
 class ISPScheduler:
     """
-    Opens all 4 CSI cameras via quanser.multimedia.VideoCapture
-    (nvargus-daemon), then grabs frames one at a time in round-robin
-    order.  This prevents ISP contention.
+    Grabs frames from all 4 CSI cameras via quanser.multimedia.VideoCapture.
+
+    nvargus-daemon on this Jetson only supports ~2 simultaneous CSI streams,
+    so we open-read-close each camera one at a time in round-robin order.
+    Only ONE camera is open at any moment.
     """
+
+    FRAMES_PER_OPEN = 2   # read N frames per open to amortise open/close cost
 
     def __init__(self, cam_ids: List[int], queues: List[queue.Queue]):
         self.cam_ids  = cam_ids
-        self.queues   = queues          # one Queue per camera
-        self._caps    = []              # VideoCapture per camera
-        self._bufs    = []              # pre-allocated read buffers
+        self.queues   = queues
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._good    = [0] * len(cam_ids)
@@ -130,7 +132,9 @@ class ISPScheduler:
         return list(zip(self._good, self._fail))
 
     # ── internal ──────────────────────────────────────────────────────────────
-    def _open_one(self, cam_id: int) -> Optional[VideoCapture]:
+    def _grab_camera(self, cam_id: int, q: queue.Queue, buf: np.ndarray):
+        """Open one camera, read a few frames, close it, push last good frame."""
+        cap = None
         try:
             url = f"video://localhost:{cam_id}"
             cap = VideoCapture(
@@ -144,79 +148,59 @@ class ISPScheduler:
                 0
             )
             cap.start()
-            logging.info(f"[ISP] cam {cam_id} opened via quanser ({url})  "
-                         f"{FRAME_WIDTH}x{FRAME_HEIGHT}")
-            return cap
         except Exception as ex:
-            logging.error(f"[ISP] cannot open cam {cam_id}: {ex}")
-            return None
-
-    def _close_one(self, cap: Optional[VideoCapture]):
-        if cap is None:
+            self._fail[self.cam_ids.index(cam_id)] += 1
+            if self._fail[self.cam_ids.index(cam_id)] % 20 == 1:
+                logging.error(f"[ISP] cannot open cam {cam_id}: {ex}")
             return
+
+        idx = self.cam_ids.index(cam_id)
+        got_any = False
         try:
-            cap.stop()
-        except Exception:
-            pass
-        try:
-            cap.close()
-        except Exception:
-            pass
+            for _ in range(self.FRAMES_PER_OPEN):
+                if not self._running:
+                    break
+                try:
+                    got = cap.read(buf)
+                except Exception:
+                    got = False
+                if got:
+                    got_any = True
+                    self._good[idx] += 1
+                else:
+                    self._fail[idx] += 1
+        finally:
+            try:
+                cap.stop()
+            except Exception:
+                pass
+            try:
+                cap.close()
+            except Exception:
+                pass
+
+        if got_any:
+            frame = buf.copy()
+            if q.full():
+                try: q.get_nowait()
+                except queue.Empty: pass
+            try: q.put_nowait(frame)
+            except queue.Full: pass
 
     def _loop(self):
-        # Open cameras ONE AT A TIME with stagger
-        for i, cam_id in enumerate(self.cam_ids):
-            cap = self._open_one(cam_id)
-            self._caps.append(cap)
-            # Pre-allocate read buffer for this camera
-            self._bufs.append(
-                np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8))
-            if i < len(self.cam_ids) - 1:
-                time.sleep(CAM_STAGGER_S)   # let ISP settle between opens
-
+        bufs = [np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+                for _ in self.cam_ids]
         n = len(self.cam_ids)
         idx = 0
 
+        logging.info(f"[ISP] open-read-close scheduler started "
+                     f"({self.FRAMES_PER_OPEN} frames/open, {n} cameras)")
+
         while self._running:
-            cap = self._caps[idx]
-            q   = self.queues[idx]
-            buf = self._bufs[idx]
-
-            if cap is None:
-                # Try to reopen
-                self._caps[idx] = self._open_one(self.cam_ids[idx])
-                idx = (idx + 1) % n
-                time.sleep(0.5)
-                continue
-
-            try:
-                got = cap.read(buf)
-            except Exception as ex:
-                got = False
-                logging.warning(f"[ISP] cam{self.cam_ids[idx]} read exception: {ex}")
-
-            if not got:
-                self._fail[idx] += 1
-                if self._fail[idx] % 50 == 1:
-                    logging.warning(f"[ISP] cam{self.cam_ids[idx]} read failed "
-                                    f"(total fails: {self._fail[idx]}), reopening")
-                self._close_one(cap)
-                self._caps[idx] = None
-            else:
-                self._good[idx] += 1
-                # buf is BGR numpy array — put a copy into the queue
-                frame = buf.copy()
-                if q.full():
-                    try: q.get_nowait()
-                    except queue.Empty: pass
-                try: q.put_nowait(frame)
-                except queue.Full: pass
-
+            cam_id = self.cam_ids[idx]
+            self._grab_camera(cam_id, self.queues[idx], bufs[idx])
             idx = (idx + 1) % n
             time.sleep(ISP_GRAB_DELAY)
-
-        for cap in self._caps:
-            self._close_one(cap)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -435,7 +419,7 @@ class Aggregator:
 # Panorama
 # ══════════════════════════════════════════════════════════════════════════════
 def panorama(frames):
-    TH=180; labels=["FRONT","RIGHT","BACK","LEFT"]; strips=[]
+    TH=180; labels=["RIGHT","BACK","FRONT","LEFT"]; strips=[]
     for i,f in enumerate(frames):
         h,w=f.shape[:2]; nw=max(1,int(w*TH/h)); s=cv2.resize(f,(nw,TH))
         cv2.putText(s,labels[i],(5,TH-6),cv2.FONT_HERSHEY_SIMPLEX,0.4,(255,255,0),1)
@@ -579,12 +563,10 @@ def main():
         _stores.append(CamStore(cfg["id"]))
 
     if not args.demo:
-        # Start ISP scheduler (sequential camera reads)
+        # Start ISP scheduler (open-read-close per camera, one at a time)
         _isp = ISPScheduler([cfg["id"] for cfg in CAMERA_CONFIG], isp_queues)
         _isp.start()
-        print("  ISP scheduler started (sequential round-robin reads)")
-        # Give cameras time to open before starting YOLO workers
-        time.sleep(CAM_STAGGER_S * len(CAMERA_CONFIG) + 0.5)
+        print("  ISP scheduler started (open-read-close, 1 camera at a time)")
     else:
         print("  Demo mode — ISP scheduler not used")
 
