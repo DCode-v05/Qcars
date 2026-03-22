@@ -114,11 +114,9 @@ class ISPScheduler:
     Grabs frames from all 4 CSI cameras via quanser.multimedia.VideoCapture.
 
     Different CSI sensors (IMX219 vs AR0144) require different resolutions,
-    so we auto-probe VIDEO_MODES on first open per camera.  Only ONE camera
-    is open at any moment (open-read-close pattern).
+    so we auto-probe VIDEO_MODES on first open per camera.
+    Cameras are kept open persistently — open/close per grab crashes nvargus.
     """
-
-    FRAMES_PER_OPEN = 2
 
     def __init__(self, cam_ids: List[int], queues: List[queue.Queue]):
         self.cam_ids   = cam_ids
@@ -131,6 +129,8 @@ class ISPScheduler:
         self._modes: List[Optional[tuple]] = [None] * len(cam_ids)
         # Per-camera read buffer (re-allocated when mode is resolved)
         self._bufs: List[Optional[np.ndarray]] = [None] * len(cam_ids)
+        # Per-camera persistent capture handle
+        self._caps: List[Optional[VideoCapture]] = [None] * len(cam_ids)
 
     def start(self):
         self._running = True
@@ -140,6 +140,11 @@ class ISPScheduler:
 
     def stop(self):
         self._running = False
+        # Close all persistent captures
+        for i, cap in enumerate(self._caps):
+            if cap is not None:
+                self._close_cap(cap)
+                self._caps[i] = None
 
     def stats(self):
         return list(zip(self._good, self._fail))
@@ -187,9 +192,8 @@ class ISPScheduler:
         except Exception:
             pass
 
-    def _probe_camera(self, cam_id: int, idx: int):
-        """Try each VIDEO_MODE until one works. Cache the result.
-        Retries the full mode list up to 3 times to handle transient ISP busy."""
+    def _probe_and_open(self, cam_id: int, idx: int):
+        """Try each VIDEO_MODE until one works. Keep the capture open."""
         for attempt in range(3):
             for w, h, fps in VIDEO_MODES:
                 if not self._running:
@@ -209,97 +213,61 @@ class ISPScheduler:
                         time.sleep(0.01)
                 except Exception:
                     got = False
-                self._close_cap(cap)
                 if got:
                     self._modes[idx] = (w, h, fps)
                     self._bufs[idx]  = np.zeros((h, w, 3), dtype=np.uint8)
+                    self._caps[idx]  = cap  # keep open!
                     logging.info(f"[ISP] cam {cam_id} probed OK: {w}x{h} @ {fps}fps")
                     return
                 else:
                     logging.warning(f"[ISP] cam {cam_id} opened {w}x{h}@{fps} but read failed")
+                    self._close_cap(cap)
             if attempt < 2:
                 logging.warning(f"[ISP] cam {cam_id}: attempt {attempt+1} failed, "
                                 f"retrying in 1s...")
                 time.sleep(1.0)
         logging.error(f"[ISP] cam {cam_id}: ALL video modes failed after 3 attempts!")
 
-    def _grab_camera(self, cam_id: int, idx: int, q: queue.Queue):
-        """Open camera with its cached mode, read frames, close, push to queue."""
-        mode = self._modes[idx]
-        if mode is None:
-            return
-        w, h, fps = mode
+    def _read_camera(self, idx: int, q: queue.Queue):
+        """Read a frame from a persistently-open camera."""
+        cap = self._caps[idx]
         buf = self._bufs[idx]
-
-        # Retry open once if ISP is transiently busy
-        cap = self._try_open(cam_id, w, h, fps)
-        if cap is None:
-            time.sleep(0.1)
-            cap = self._try_open(cam_id, w, h, fps)
-        if cap is None:
-            self._fail[idx] += 1
+        if cap is None or buf is None:
             return
-
-        got_any = False
         try:
-            # Wait for first frame (camera needs warmup after start)
-            for _ in range(100):
-                if not self._running:
-                    break
-                try:
-                    got = cap.read(buf)
-                except Exception:
-                    got = False
-                if got:
-                    got_any = True
-                    self._good[idx] += 1
-                    break
-                time.sleep(0.01)
-            # Read additional frames if warmup succeeded
-            if got_any:
-                for _ in range(self.FRAMES_PER_OPEN - 1):
-                    if not self._running:
-                        break
-                    try:
-                        got = cap.read(buf)
-                    except Exception:
-                        got = False
-                    if got:
-                        self._good[idx] += 1
-                    else:
-                        self._fail[idx] += 1
-            else:
-                self._fail[idx] += 1
-        finally:
-            self._close_cap(cap)
-
-        if got_any:
+            got = cap.read(buf)
+        except Exception:
+            got = False
+        if got:
+            self._good[idx] += 1
             frame = buf.copy()
             if q.full():
                 try: q.get_nowait()
                 except queue.Empty: pass
             try: q.put_nowait(frame)
             except queue.Full: pass
+        else:
+            self._fail[idx] += 1
 
     def _loop(self):
         n = len(self.cam_ids)
 
-        # Phase 1: probe each camera to find its working resolution
+        # Phase 1: probe each camera and keep it open
         logging.info(f"[ISP] probing {n} cameras for supported video modes...")
         for i, cam_id in enumerate(self.cam_ids):
             if not self._running:
                 return
-            self._probe_camera(cam_id, i)
+            self._probe_and_open(cam_id, i)
             time.sleep(CAM_STAGGER_S)
 
         resolved = sum(1 for m in self._modes if m is not None)
         logging.info(f"[ISP] {resolved}/{n} cameras resolved, starting capture loop")
 
-        # Phase 2: round-robin capture
+        # Phase 2: round-robin read (cameras stay open)
         idx = 0
         while self._running:
-            if self._modes[idx] is not None:
-                self._grab_camera(self.cam_ids[idx], idx, self.queues[idx])
+            if self._caps[idx] is not None:
+                self._read_camera(idx, self.queues[idx])
             idx = (idx + 1) % n
             time.sleep(ISP_GRAB_DELAY)
 
