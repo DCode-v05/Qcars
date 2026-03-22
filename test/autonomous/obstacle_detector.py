@@ -406,27 +406,37 @@ class ObstacleDetector:
             w_score = min(gap['width_deg'] / 90.0, 1.0)
             d_score = min(gap['depth'] / cfg.VFH_PLAN_RANGE_M, 1.0)
 
+            # Goal alignment
             angle_diff = abs(gap['angle'] - self._goal_heading)
             if angle_diff > np.pi:
                 angle_diff = 2 * np.pi - angle_diff
             g_score = 1.0 - (angle_diff / np.pi)
 
+            # Forward preference: heavily reward gaps reachable without reversing
             gap_norm = gap['angle']
             if gap_norm > np.pi:
                 gap_norm -= 2 * np.pi
+            is_forward = abs(gap_norm) <= np.radians(120)
+
+            # Forward bonus: strongly prefer ANY forward-reachable gap
+            fwd_bonus = 0.5 if is_forward else 0.0
+
+            # Turn severity: prefer gaps closer to straight ahead
             turn_severity = abs(gap_norm) / np.pi
             t_penalty = 1.0 - cfg.VFH_TURN_PENALTY * turn_severity
 
+            # Side clearance bonus
             side_bonus = 0.0
             if gap_norm > 0.1 and left_dist > cfg.SIDE_CLEAR_M:
                 side_bonus = 0.1
             elif gap_norm < -0.1 and right_dist > cfg.SIDE_CLEAR_M:
                 side_bonus = 0.1
 
-            score = (0.25 * w_score +
-                     0.25 * d_score +
-                     0.35 * g_score * cfg.VFH_GOAL_BIAS +
+            score = (0.20 * w_score +
+                     0.20 * d_score +
+                     0.25 * g_score * cfg.VFH_GOAL_BIAS +
                      0.15 * t_penalty +
+                     fwd_bonus +
                      side_bonus)
 
             if score > best_score:
@@ -454,24 +464,32 @@ class ObstacleDetector:
         if forward:
             steer = cfg.STEERING_GAIN * a
 
-            # Scale steering by distance (gentler when close)
-            proximity = max(min(front_dist, 1.5), 0.2)
-            scale = 0.4 + 0.6 * (proximity / 1.5)
-            steer *= scale
+            # URGENCY scaling: steer HARDER when close to obstacles, not softer.
+            # When front_dist is small, we MUST turn aggressively.
+            if front_dist < cfg.ZONE_WARN_M:
+                # Very close — full urgency, steer as hard as needed
+                urgency = 1.3
+            elif front_dist < cfg.ZONE_CLEAR_M:
+                # Moderate distance — proportional urgency
+                urgency = 0.8 + 0.5 * (1.0 - front_dist / cfg.ZONE_CLEAR_M)
+            else:
+                # Clear path — gentle steering
+                urgency = 0.8
+            steer *= urgency
 
-            # Side clearance check
+            # Side clearance: only limit steering if about to scrape a wall
             if steer > 0.05 and right_dist < cfg.SIDE_CLEAR_M:
-                steer = min(steer, 0.03)
+                steer = min(steer, 0.05)
             elif steer < -0.05 and left_dist < cfg.SIDE_CLEAR_M:
-                steer = max(steer, -0.03)
+                steer = max(steer, -0.05)
         else:
             # Best gap is behind — report this to navigator.
             # Provide a forward steering suggestion toward the SIDE with more space
             # (navigator will decide whether to actually reverse)
             if left_dist > right_dist:
-                steer = cfg.MAX_STEERING_RAD * 0.7
+                steer = cfg.MAX_STEERING_RAD * 0.8
             else:
-                steer = -cfg.MAX_STEERING_RAD * 0.7
+                steer = -cfg.MAX_STEERING_RAD * 0.8
 
         steer = max(-cfg.MAX_STEERING_RAD, min(steer, cfg.MAX_STEERING_RAD))
         return float(steer), forward

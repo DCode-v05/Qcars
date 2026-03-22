@@ -59,7 +59,6 @@ class Navigator:
         rear_dist  = detection['rear_min_m']
         left_dist  = detection.get('left_min_m', 9.0)
         right_dist = detection.get('right_min_m', 9.0)
-        zone       = detection['zone']
         now        = time.perf_counter()
 
         # ── IMU crash detection ───────────────────────────────────────────
@@ -88,42 +87,51 @@ class Navigator:
             self.state = 'REVERSING'
         else:
             # ── Autonomous decision ───────────────────────────────────────
-            # FORWARD BIAS: only reverse when truly no forward option exists
+            # FORWARD FIRST: exhaust ALL forward options before reversing.
+            # Only reverse when entire front ±60° is truly blocked.
             #
-            # Check: is there ANY forward-ish path?
-            # drive_fwd from VFH means the best gap is within ±120° of front.
-            # Even in STOP zone, if drive_fwd=True, go forward (just slowly).
+            # Priority ladder (check forward possibilities FIRST):
+            #   1. VFH found forward gap → DRIVING
+            #   2. Front not critically close → DRIVING
+            #   3. Any side has space → DRIVING (turn hard)
+            #   4. ALL of above fail → REVERSING (only if rear clear)
+            #   5. Truly boxed in → still DRIVING (creep with max steer)
 
             if drive_fwd:
-                # There IS a forward path — always go forward
-                if zone == 'CLEAR':
-                    self.state = 'DRIVING'
-                else:
-                    self.state = 'DRIVING'  # avoid = still drive forward, just steer
+                self.state = 'DRIVING'
+            elif front_dist > cfg.ZONE_WARN_M:
+                self.state = 'DRIVING'
+            elif left_dist > 0.3 or right_dist > 0.3:
+                self.state = 'DRIVING'
+            elif rear_dist > cfg.REAR_CLEAR_M:
+                self.state = 'REVERSING'
             else:
-                # VFH says ALL forward paths are blocked, best gap is behind.
-                # Double-check: is front truly blocked AND rear is clear?
-                if front_dist < cfg.ZONE_WARN_M and rear_dist > cfg.REAR_CLEAR_M:
-                    self.state = 'REVERSING'
-                else:
-                    # Front is somewhat clear OR rear is also blocked — creep forward
-                    self.state = 'DRIVING'
+                self.state = 'DRIVING'
 
         # ── Compute throttle + steering ───────────────────────────────────
+        # RULE: Throttle is ALWAYS 0.10 (forward or reverse). Never reduce.
 
         if self.state == 'DRIVING':
             throttle = cfg.THROTTLE
-            steering = self._smooth_steer(path_steer, dt)
+            # Straightening: if front is clear (no obstacle nearby),
+            # blend steering toward 0 (straight) to drive in a line
+            if front_dist > cfg.ZONE_CLEAR_M:
+                # Clear ahead — steer toward straight (0°)
+                straight_blend = 0.3  # 30% toward straight each tick
+                blended = path_steer * (1.0 - straight_blend)
+                steering = self._smooth_steer(blended, dt)
+            else:
+                steering = self._smooth_steer(path_steer, dt)
 
         elif self.state == 'REVERSING':
             throttle = -cfg.THROTTLE
             # Steer toward side with more space while reversing
             if left_dist > right_dist:
-                rev_steer = cfg.MAX_STEERING_RAD * 0.7
+                rev_steer = cfg.MAX_STEERING_RAD * 0.8
             elif right_dist > left_dist:
-                rev_steer = -cfg.MAX_STEERING_RAD * 0.7
+                rev_steer = -cfg.MAX_STEERING_RAD * 0.8
             else:
-                rev_steer = cfg.MAX_STEERING_RAD * 0.5 if path_steer > 0 else -cfg.MAX_STEERING_RAD * 0.5
+                rev_steer = cfg.MAX_STEERING_RAD * 0.6 if path_steer > 0 else -cfg.MAX_STEERING_RAD * 0.6
             steering = self._smooth_steer(rev_steer, dt)
 
         elif self.state == 'MANUAL_FWD':
@@ -138,11 +146,7 @@ class Navigator:
             throttle = cfg.THROTTLE
             steering = self._smooth_steer(path_steer, dt)
 
-        # ── Distance-based throttle scaling (forward only) ────────────────
-        if throttle > 0 and front_dist < cfg.ZONE_CLEAR_M:
-            ratio = max(front_dist, 0.1) / cfg.ZONE_CLEAR_M
-            scaled = cfg.CREEP_THROTTLE + (cfg.THROTTLE - cfg.CREEP_THROTTLE) * ratio
-            throttle = min(throttle, scaled)
+        # NO distance-based throttle reduction — always full 0.10
 
         leds = self._get_leds(detection.get('avoid_side', 'NONE'))
 
