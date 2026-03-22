@@ -1,10 +1,9 @@
 """
 dashboard.py  —  Live web dashboard for QCar 2
-Flask server at http://10.1.77.73:5000
+Flask server at http://<jetson-ip>:5000
 
-CRITICAL FIX: All image rendering runs in a background thread at max 5Hz.
-Dashboard.update() is now instant (~0ms) — never blocks the main control loop.
-Depth chart uses OpenCV instead of matplotlib (~1ms vs ~200ms).
+FIX: NO full page reloads. HTML loads once, JS fetches /api/data (JSON)
+and swaps image src with cache-busting. ~1 small JSON + 1 image per cycle.
 """
 import io
 import threading
@@ -14,7 +13,7 @@ import cv2
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, jsonify
 
 from obstacle_detector import (
     ZONE_CLEAR, ZONE_WARN, ZONE_STOP,
@@ -35,14 +34,13 @@ class _State:
         self.leds        = [0]*8
         self.timing      = {}
         self.sm_state    = 'IDLE'
-        self._raw_frame  = None     # raw BGR for render thread
+        self._raw_frame  = None
         self._cam_jpeg   = b''
         self._lidar_png  = b''
         self._depth_png  = b''
-        self._dirty      = False    # new data available for rendering
+        self._dirty      = False
 
     def push(self, detection, pose, speed_mps, dist_goal, leds, timing, sm_state):
-        """Called from main loop — instant, no rendering."""
         with self._lock:
             self.detection  = detection
             self.pose       = pose
@@ -55,7 +53,6 @@ class _State:
             self._dirty     = True
 
     def pop_for_render(self):
-        """Called from render thread — grabs snapshot and clears dirty flag."""
         with self._lock:
             if not self._dirty:
                 return None
@@ -69,11 +66,46 @@ class _State:
             if lidar_png:  self._lidar_png = lidar_png
             if depth_png:  self._depth_png = depth_png
 
-    def get(self):
+    def get_json(self):
         with self._lock:
-            return (dict(self.detection), self.pose.copy(),
-                    self.speed_mps, self.dist_goal,
-                    list(self.leds), dict(self.timing), self.sm_state)
+            det   = dict(self.detection)
+            pose  = self.pose.copy()
+            speed = self.speed_mps
+            dg    = self.dist_goal
+            leds  = list(self.leds)
+            tim   = dict(self.timing)
+            sm    = self.sm_state
+        GOAL_M = 15.0
+        dist_m = det.get('distance_m', 99.0)
+        rmin   = det.get('rear_min_m', 99.0)
+        smin   = det.get('sector_min_m', 99.0)
+        prog   = max(0, min(100, int((1 - min(dg, GOAL_M)/GOAL_M)*100)))
+        return {
+            'sm': sm,
+            'zone': det.get('zone', ZONE_CLEAR),
+            'beh': det.get('behaviour', BEHAVIOUR_NAVIGATE),
+            'otype': det.get('obstacle_type', 'NONE'),
+            'dist': f"{dist_m:.2f}m" if dist_m < 90 else "---",
+            'gdist': f"{dg:.2f}m" if dg < 90 else "---",
+            'spd': f"{speed:.2f}",
+            'bat': f"{det.get('battery_v',0):.1f}",
+            'nd': det.get('n_yolo_dets', 0),
+            'yfps': f"{det.get('yolo_fps',0):.0f}",
+            'smin': f"{smin:.2f}",
+            'rmin': f"{rmin:.1f}" if rmin < 90 else "---",
+            'aside': det.get('avoid_side','left').upper(),
+            'lm': f"{det.get('left_clear_m',99):.1f}m" if det.get('left_clear_m',99)<90 else "---",
+            'rm': f"{det.get('right_clear_m',99):.1f}m" if det.get('right_clear_m',99)<90 else "---",
+            'px': f"{pose[0]:+.3f}", 'py': f"{pose[1]:+.3f}",
+            'pth': f"{pose[2]:+.3f}", 'pthd': f"{np.degrees(pose[2]):+.1f}",
+            'herr': f"{tim.get('heading_err',0):+.3f}",
+            'prog': prog,
+            'leds': leds,
+            'lms': f"{tim.get('loop_ms',0):.0f}",
+            'lhz': f"{tim.get('lidar_hz',0):.1f}",
+            'thr': f"{tim.get('throttle',0):+.3f}",
+            'str': f"{tim.get('steering',0):+.3f}",
+        }
 
     def get_cam(self):
         with self._lock: return self._cam_jpeg
@@ -89,7 +121,6 @@ _s = _State()
 # ── Fast image generators ────────────────────────────────────────────────────
 
 def _cam_jpeg(frame):
-    """Encode BGR frame to JPEG. ~5ms."""
     if frame is None:
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(frame, 'No frame', (220, 240),
@@ -99,64 +130,35 @@ def _cam_jpeg(frame):
 
 
 def _depth_cv2(det):
-    """
-    Depth clearance bar chart using OpenCV — replaces matplotlib.
-    ~1ms instead of ~200ms.
-    """
     W, H = 280, 180
-    img = np.full((H, W, 3), (22, 27, 13), dtype=np.uint8)  # #0d1117 BGR
-
-    lm = det.get('left_clear_m',  99.0)
+    img = np.full((H, W, 3), (22, 27, 13), dtype=np.uint8)
+    lm = det.get('left_clear_m', 99.0)
     rm = det.get('right_clear_m', 99.0)
-    gs = det.get('gap_side',      'left')
-    gw = det.get('gap_width_px',  0)
-
-    max_d = 3.0
-    bar_w = 55
-    max_h = H - 50
+    gs = det.get('gap_side', 'left')
+    gw = det.get('gap_width_px', 0)
+    max_d, bar_w, max_h = 3.0, 55, H - 50
     lh = int((min(lm, max_d) / max_d) * max_h)
     rh = int((min(rm, max_d) / max_d) * max_h)
-
-    # Colours (BGR): green=(80,185,63), blue=(253,139,56), yellow=(65,179,227)
     lcolor = (80, 185, 63) if gs == 'left' else (253, 139, 56)
     rcolor = (80, 185, 63) if gs == 'right' else (65, 179, 227)
-
-    # Left bar
-    x1l = 50
+    x1l, x1r = 50, W - 50 - bar_w
     cv2.rectangle(img, (x1l, H-25-lh), (x1l+bar_w, H-25), lcolor, -1)
-    # Right bar
-    x1r = W - 50 - bar_w
     cv2.rectangle(img, (x1r, H-25-rh), (x1r+bar_w, H-25), rcolor, -1)
-
-    # Labels
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    grey = (142, 149, 158)
-    white = (201, 209, 217)
+    font, grey, white = cv2.FONT_HERSHEY_SIMPLEX, (142,149,158), (201,209,217)
     cv2.putText(img, 'Left', (x1l+5, H-8), font, 0.38, grey, 1)
     cv2.putText(img, 'Right', (x1r+2, H-8), font, 0.38, grey, 1)
-
-    lt = f'{lm:.1f}m' if lm < 90 else '---'
-    rt = f'{rm:.1f}m' if rm < 90 else '---'
-    cv2.putText(img, lt, (x1l+5, H-30-lh), font, 0.38, white, 1)
-    cv2.putText(img, rt, (x1r+5, H-30-rh), font, 0.38, white, 1)
-
-    # Title
-    title = f'Gap: {gs.upper()}  {gw}px'
-    cv2.putText(img, title, (10, 16), font, 0.42, white, 1)
-
-    # Scale marks
-    for i, label in enumerate(['0m', '1m', '2m', '3m']):
+    cv2.putText(img, f'{lm:.1f}m' if lm<90 else '---', (x1l+5, H-30-lh), font, 0.38, white, 1)
+    cv2.putText(img, f'{rm:.1f}m' if rm<90 else '---', (x1r+5, H-30-rh), font, 0.38, white, 1)
+    cv2.putText(img, f'Gap: {gs.upper()}  {gw}px', (10, 16), font, 0.42, white, 1)
+    for i, label in enumerate(['0m','1m','2m','3m']):
         y = H - 25 - int((i / 3.0) * max_h)
         cv2.line(img, (40, y), (W-40, y), (33, 38, 48), 1)
         cv2.putText(img, label, (5, y+4), font, 0.3, grey, 1)
-
     _, buf = cv2.imencode('.png', img)
     return buf.tobytes()
 
 
 class _LidarRenderer:
-    """Reusable polar plot for LiDAR scans. Figure created once."""
-
     def __init__(self, max_r=4.0):
         self.max_r = max_r
         self._fig = plt.figure(figsize=(3.5, 3.5), facecolor='#0d1117')
@@ -176,29 +178,24 @@ class _LidarRenderer:
         ax = self._ax
         ax.cla()
         self._setup_axes()
-
         max_r = self.max_r
         fha = np.radians(40)
         distances = det.get('all_distances', np.array([]))
         angles    = det.get('all_angles',    np.array([]))
         valid     = det.get('all_valid',     np.array([], dtype=bool))
-
         if len(distances) > 0 and valid.sum() > 0:
             d_v = distances[valid]; a_v = angles[valid]; clip = d_v < max_r
-            il  = (a_v >= 0) & (a_v <= fha)
-            ir  = a_v >= (2*np.pi - fha)
+            il = (a_v >= 0) & (a_v <= fha)
+            ir = a_v >= (2*np.pi - fha)
             ins = il | ir
-            sm  = ins & (d_v <= 0.4)
-            wm  = ins & (d_v > 0.4) & (d_v <= 1.5)
-            sf  = ~sm & ~wm
+            sm = ins & (d_v <= 0.4)
+            wm = ins & (d_v > 0.4) & (d_v <= 1.5)
+            sf = ~sm & ~wm
             if (sf & clip).sum(): ax.scatter(a_v[sf&clip], d_v[sf&clip], s=3, c='#388bfd', alpha=0.7, linewidths=0)
             if (wm & clip).sum(): ax.scatter(a_v[wm&clip], d_v[wm&clip], s=8, c='#e3b341', alpha=0.9, linewidths=0)
             if (sm & clip).sum(): ax.scatter(a_v[sm&clip], d_v[sm&clip], s=12,c='#f85149', alpha=1.0, linewidths=0)
-
-            # Also show rear points (dimmer)
             rear = ~ins & clip
             if rear.sum(): ax.scatter(a_v[rear], d_v[rear], s=2, c='#484f58', alpha=0.4, linewidths=0)
-
         ax.fill_between(np.linspace(-fha, fha, 60), 0, max_r, color='#e3b341', alpha=0.05)
         ring = np.linspace(0, 2*np.pi, 200)
         ax.plot(ring, [1.5]*200, '--', c='#e3b341', lw=0.7, alpha=0.5)
@@ -208,7 +205,6 @@ class _LidarRenderer:
             if r < max_r:
                 ax.text(np.pi/6, r, f'{r}m', color='#484f58', fontsize=6, ha='center')
         plt.tight_layout(pad=0.1)
-
         buf = io.BytesIO()
         self._fig.savefig(buf, format='png', dpi=80, facecolor='#0d1117', bbox_inches='tight')
         buf.seek(0)
@@ -219,198 +215,158 @@ class _LidarRenderer:
 
 _app = Flask(__name__)
 
-_HTML = """<!DOCTYPE html>
-<html>
-<head>
-<title>QCar 2 — Live Observer</title>
+# HTML loaded ONCE by the browser — never reloaded.
+# All data updates via fetch('/api/data') + DOM manipulation.
+_HTML = """<!DOCTYPE html><html><head>
+<title>QCar 2</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:#0d1117;color:#c9d1d9;font-family:monospace;font-size:13px;padding:8px;}
-.topbar{background:#161b22;border:1px solid #21262d;border-radius:6px;
-        padding:7px 12px;margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;}
-.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;}
-.grid3b{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
-.card{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:8px;}
-.title{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;}
-.big{font-size:19px;font-weight:bold;margin:3px 0;}
-.row{display:flex;justify-content:space-between;padding:2px 0;
-     border-bottom:1px solid #21262d;font-size:12px;}
-.row:last-child{border:none;}
-.lbl{color:#8b949e;}.val{color:#c9d1d9;}
-img{width:100%;border-radius:3px;display:block;}
-.CLEAR,.NAVIGATE{color:#3fb950;}.WARN,.AVOID{color:#388bfd;}
-.STOP,.EMERGENCY_STOP{color:#f85149;}.WAITING,.WAIT{color:#e3b341;}
-.PERSON{color:#f85149;}.MOVING{color:#e3b341;}
-.STATIC{color:#388bfd;}.NONE,.ARRIVED,.IDLE{color:#484f58;}
-.REVERSING{color:#d2a8ff;}
-.led-on{display:inline-block;width:11px;height:11px;border-radius:50%;
-        background:#e3b341;margin:0 2px;vertical-align:middle;}
-.led-off{display:inline-block;width:11px;height:11px;border-radius:50%;
-         background:#21262d;border:1px solid #30363d;margin:0 2px;vertical-align:middle;}
-</style>
-</head>
-<body>
-<div class="topbar">
-  <span style="color:#3fb950;font-size:15px;font-weight:bold;">QCar 2</span>
-  <span>FSM: <b class="{{ sm_state }}">{{ sm_state }}</b></span>
-  <span>ZONE: <b class="{{ zone }}">{{ zone }}</b></span>
-  <span>TYPE: <b class="{{ obj_type }}">{{ obj_type }}</b></span>
-  <span>BEH: <b class="{{ behaviour }}">{{ behaviour }}</b></span>
-  <span>obs: <b>{{ dist }}</b></span>
-  <span>goal: <b>{{ goal_dist }}</b></span>
-  <span>spd: <b>{{ speed }}</b></span>
-  <span>batt: <b>{{ battery }}V</b></span>
-  <span>loop: <b>{{ loop_ms }}ms</b></span>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font-family:monospace;font-size:13px;padding:8px}
+.tb{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:7px 12px;margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px}
+.g3b{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.c{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:8px}
+.t{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.big{font-size:19px;font-weight:bold;margin:3px 0}
+.r{display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #21262d;font-size:12px}
+.r:last-child{border:none}
+.l{color:#8b949e}.v{color:#c9d1d9}
+img{width:100%;border-radius:3px;display:block}
+.lon{display:inline-block;width:11px;height:11px;border-radius:50%;background:#e3b341;margin:0 2px;vertical-align:middle}
+.lof{display:inline-block;width:11px;height:11px;border-radius:50%;background:#21262d;border:1px solid #30363d;margin:0 2px;vertical-align:middle}
+.bb{width:80px;height:7px;background:#21262d;border-radius:3px;display:inline-block;vertical-align:middle}
+.bf{height:7px;background:#3fb950;border-radius:3px}
+</style></head><body>
+
+<div class="tb">
+  <span style="color:#3fb950;font-size:15px;font-weight:bold">QCar 2</span>
+  <span>FSM: <b id="d_sm">---</b></span>
+  <span>ZONE: <b id="d_zone">---</b></span>
+  <span>TYPE: <b id="d_otype">---</b></span>
+  <span>BEH: <b id="d_beh">---</b></span>
+  <span>obs: <b id="d_dist">---</b></span>
+  <span>goal: <b id="d_gdist">---</b></span>
+  <span>spd: <b id="d_spd">---</b></span>
+  <span>batt: <b id="d_bat">---</b>V</span>
+  <span>loop: <b id="d_lms">---</b>ms</span>
 </div>
-<div class="grid3">
-  <div class="card">
-    <div class="title">CSI front + YOLO</div>
-    <img src="/camera" alt="camera">
-    <div style="color:#484f58;font-size:11px;margin-top:3px;">
-      {{ n_dets }} dets | {{ yolo_fps }}fps
-    </div>
+
+<div class="g3">
+  <div class="c"><div class="t">CSI front + YOLO</div>
+    <img id="ic" src="/camera" alt="cam">
+    <div style="color:#484f58;font-size:11px;margin-top:3px"><span id="d_nd">0</span> dets | <span id="d_yfps">0</span>fps</div>
   </div>
-  <div class="card">
-    <div class="title">LiDAR (polar, up=fwd)</div>
-    <img src="/lidar" alt="lidar">
-    <div style="color:#484f58;font-size:11px;margin-top:3px;">
-      fwd min={{ sector_min }}m | rear={{ rear_min }}m
-    </div>
+  <div class="c"><div class="t">LiDAR (polar)</div>
+    <img id="il" src="/lidar" alt="lidar">
+    <div style="color:#484f58;font-size:11px;margin-top:3px">fwd=<span id="d_smin">---</span>m rear=<span id="d_rmin">---</span>m</div>
   </div>
-  <div class="card">
-    <div class="title">Depth clearance</div>
-    <img src="/depth" alt="depth">
-    <div style="color:#484f58;font-size:11px;margin-top:3px;">
-      steer: <b>{{ avoid_side }}</b>
-    </div>
+  <div class="c"><div class="t">Depth clearance</div>
+    <img id="id" src="/depth" alt="depth">
+    <div style="color:#484f58;font-size:11px;margin-top:3px">steer: <b id="d_aside">---</b></div>
   </div>
 </div>
-<div class="grid3b">
-  <div class="card">
-    <div class="title">Obstacle</div>
-    <div class="big {{ obj_type }}">{{ obj_type }}</div>
-    <div class="row"><span class="lbl">LiDAR fwd</span><span class="val {{ zone }}">{{ dist }}</span></div>
-    <div class="row"><span class="lbl">LiDAR rear</span><span class="val">{{ rear_min }}m</span></div>
-    <div class="row"><span class="lbl">Behaviour</span><span class="val {{ behaviour }}">{{ behaviour }}</span></div>
-    <div class="row"><span class="lbl">Avoid</span><span class="val">{{ avoid_side }}</span></div>
-    <div class="row"><span class="lbl">L/R clear</span><span class="val">{{ left_m }} / {{ right_m }}</span></div>
+
+<div class="g3b">
+  <div class="c"><div class="t">Obstacle</div>
+    <div class="big" id="d_ot2">NONE</div>
+    <div class="r"><span class="l">LiDAR fwd</span><span class="v" id="d_d2">---</span></div>
+    <div class="r"><span class="l">LiDAR rear</span><span class="v" id="d_r2">---</span></div>
+    <div class="r"><span class="l">Behaviour</span><span class="v" id="d_b2">---</span></div>
+    <div class="r"><span class="l">Avoid</span><span class="v" id="d_a2">---</span></div>
+    <div class="r"><span class="l">L/R clear</span><span class="v" id="d_lr">---</span></div>
   </div>
-  <div class="card">
-    <div class="title">Pose + nav</div>
-    <div class="row"><span class="lbl">x</span><span class="val">{{ px }}m</span></div>
-    <div class="row"><span class="lbl">y</span><span class="val">{{ py }}m</span></div>
-    <div class="row"><span class="lbl">th</span><span class="val">{{ pth }}rad ({{ pth_deg }}deg)</span></div>
-    <div class="row"><span class="lbl">goal</span><span class="val">{{ goal_dist }}</span></div>
-    <div class="row"><span class="lbl">h_err</span><span class="val">{{ h_err }}rad</span></div>
-    <div class="row"><span class="lbl">FSM</span><span class="val {{ sm_state }}">{{ sm_state }}</span></div>
-    <div class="row"><span class="lbl">progress</span>
-      <span class="val">
-        <div style="width:80px;height:7px;background:#21262d;border-radius:3px;display:inline-block;vertical-align:middle;">
-          <div style="width:{{ progress }}%;height:7px;background:#3fb950;border-radius:3px;"></div>
-        </div> {{ progress }}%
-      </span>
-    </div>
+  <div class="c"><div class="t">Pose + nav</div>
+    <div class="r"><span class="l">x</span><span class="v" id="d_px">---</span></div>
+    <div class="r"><span class="l">y</span><span class="v" id="d_py">---</span></div>
+    <div class="r"><span class="l">th</span><span class="v" id="d_pth">---</span></div>
+    <div class="r"><span class="l">goal</span><span class="v" id="d_g2">---</span></div>
+    <div class="r"><span class="l">h_err</span><span class="v" id="d_he">---</span></div>
+    <div class="r"><span class="l">FSM</span><span class="v" id="d_f2">---</span></div>
+    <div class="r"><span class="l">progress</span><span class="v"><div class="bb"><div class="bf" id="d_bar" style="width:0%"></div></div> <span id="d_pr">0</span>%</span></div>
   </div>
-  <div class="card">
-    <div class="title">LEDs + perf</div>
-    <div style="margin-bottom:8px;line-height:2;">
-      <span class="lbl">Head</span>
-      <span class="{{ 'led-on' if leds6 else 'led-off' }}"></span>
-      <span class="{{ 'led-on' if leds7 else 'led-off' }}"></span>
-      <span class="lbl">Brk</span>
-      <span class="{{ 'led-on' if leds4 else 'led-off' }}"></span>
-      <span class="lbl">L</span>
-      <span class="{{ 'led-on' if leds0 else 'led-off' }}"></span>
-      <span class="lbl">R</span>
-      <span class="{{ 'led-on' if leds2 else 'led-off' }}"></span>
+  <div class="c"><div class="t">LEDs + perf</div>
+    <div style="margin-bottom:8px;line-height:2">
+      <span class="l">Head</span><span id="l6" class="lof"></span><span id="l7" class="lof"></span>
+      <span class="l">Brk</span><span id="l4" class="lof"></span>
+      <span class="l">L</span><span id="l0" class="lof"></span>
+      <span class="l">R</span><span id="l2" class="lof"></span>
     </div>
-    <div class="row"><span class="lbl">Loop</span><span class="val">{{ loop_ms }}ms</span></div>
-    <div class="row"><span class="lbl">LiDAR</span><span class="val">{{ lidar_hz }}Hz</span></div>
-    <div class="row"><span class="lbl">YOLO</span><span class="val">{{ yolo_fps }}fps</span></div>
-    <div class="row"><span class="lbl">Thr</span><span class="val">{{ throttle }}</span></div>
-    <div class="row"><span class="lbl">Str</span><span class="val">{{ steering }}rad</span></div>
-    <div class="row"><span class="lbl">Batt</span><span class="val">{{ battery }}V</span></div>
+    <div class="r"><span class="l">Loop</span><span class="v" id="d_lm2">---</span></div>
+    <div class="r"><span class="l">LiDAR</span><span class="v" id="d_lhz">---</span></div>
+    <div class="r"><span class="l">YOLO</span><span class="v" id="d_yf2">---</span></div>
+    <div class="r"><span class="l">Thr</span><span class="v" id="d_thr">---</span></div>
+    <div class="r"><span class="l">Str</span><span class="v" id="d_str">---</span></div>
+    <div class="r"><span class="l">Batt</span><span class="v" id="d_bt2">---</span></div>
   </div>
 </div>
-<script>setTimeout(()=>location.reload(), 500);</script>
+
+<script>
+var CM={CLEAR:'#3fb950',NAVIGATE:'#3fb950',NAVIGATING:'#3fb950',
+WARN:'#388bfd',AVOID:'#388bfd',AVOIDING:'#388bfd',
+STOP:'#f85149',EMERGENCY_STOP:'#f85149',STOPPED:'#f85149',
+WAITING:'#e3b341',WAIT:'#e3b341',
+PERSON:'#f85149',MOVING:'#e3b341',STATIC:'#388bfd',
+NONE:'#484f58',ARRIVED:'#484f58',IDLE:'#484f58',REVERSING:'#d2a8ff'};
+
+function S(id,v,col){var e=document.getElementById(id);if(!e)return;e.textContent=v;if(col)e.style.color=CM[v]||'#c9d1d9'}
+function L(id,on){var e=document.getElementById(id);if(e)e.className=on?'lon':'lof'}
+
+var tk=0;
+function poll(){
+  fetch('/api/data').then(function(r){return r.json()}).then(function(d){
+    S('d_sm',d.sm,1);S('d_zone',d.zone,1);S('d_otype',d.otype,1);S('d_beh',d.beh,1);
+    S('d_dist',d.dist);S('d_gdist',d.gdist);S('d_spd',d.spd);S('d_bat',d.bat);S('d_lms',d.lms);
+    S('d_nd',d.nd);S('d_yfps',d.yfps);S('d_smin',d.smin);S('d_rmin',d.rmin);S('d_aside',d.aside);
+    var o2=document.getElementById('d_ot2');o2.textContent=d.otype;o2.style.color=CM[d.otype]||'#c9d1d9';
+    S('d_d2',d.dist);document.getElementById('d_d2').style.color=CM[d.zone]||'#c9d1d9';
+    S('d_r2',d.rmin+'m');S('d_b2',d.beh);document.getElementById('d_b2').style.color=CM[d.beh]||'#c9d1d9';
+    S('d_a2',d.aside);S('d_lr',d.lm+' / '+d.rm);
+    S('d_px',d.px+'m');S('d_py',d.py+'m');S('d_pth',d.pth+'rad ('+d.pthd+'\u00b0)');
+    S('d_g2',d.gdist);S('d_he',d.herr+'rad');
+    S('d_f2',d.sm);document.getElementById('d_f2').style.color=CM[d.sm]||'#c9d1d9';
+    document.getElementById('d_bar').style.width=d.prog+'%';S('d_pr',d.prog);
+    L('l0',d.leds[0]);L('l2',d.leds[2]);L('l4',d.leds[4]);L('l6',d.leds[6]);L('l7',d.leds[7]);
+    S('d_lm2',d.lms+'ms');S('d_lhz',d.lhz+'Hz');S('d_yf2',d.yfps+'fps');
+    S('d_thr',d.thr);S('d_str',d.str+'rad');S('d_bt2',d.bat+'V');
+    // Stagger images: only refresh 1 per cycle
+    var t=Date.now();tk++;
+    if(tk%3===0)document.getElementById('ic').src='/camera?'+t;
+    if(tk%3===1)document.getElementById('il').src='/lidar?'+t;
+    if(tk%3===2)document.getElementById('id').src='/depth?'+t;
+  }).catch(function(){});
+}
+setInterval(poll,333);
+</script>
 </body></html>"""
 
 
 @_app.route('/')
 def index():
-    det, pose, speed, dist_goal, leds, timing, sm_state = _s.get()
-    GOAL_M = 2.0
-    zone     = det.get('zone',           ZONE_CLEAR)
-    behav    = det.get('behaviour',      BEHAVIOUR_NAVIGATE)
-    obj_type = det.get('obstacle_type',  'NONE')
-    dist_m   = det.get('distance_m',     99.0)
-    avoid    = det.get('avoid_side',     'left')
-    lm       = det.get('left_clear_m',   99.0)
-    rm       = det.get('right_clear_m',  99.0)
-    smin     = det.get('sector_min_m',   99.0)
-    rmin     = det.get('rear_min_m',     99.0)
-    gw       = det.get('gap_width_px',   0)
-    yfps     = det.get('yolo_fps',       0.0)
-    ndets    = det.get('n_yolo_dets',    0)
-    batt     = det.get('battery_v',      0.0)
-    throttle = timing.get('throttle',    0.0)
-    steering = timing.get('steering',    0.0)
-    h_err    = timing.get('heading_err', 0.0)
-    prog     = max(0, min(100, int((1 - min(dist_goal, GOAL_M)/GOAL_M)*100)))
+    return _HTML
 
-    return render_template_string(
-        _HTML,
-        sm_state  = sm_state,
-        zone      = zone,
-        behaviour = behav,
-        obj_type  = obj_type,
-        dist      = f"{dist_m:.2f}m" if dist_m<90 else "---",
-        goal_dist = f"{dist_goal:.2f}m" if dist_goal<90 else "---",
-        speed     = f"{speed:.2f}",
-        battery   = f"{batt:.1f}",
-        n_dets    = ndets,
-        yolo_fps  = f"{yfps:.0f}",
-        sector_min= f"{smin:.2f}",
-        rear_min  = f"{rmin:.1f}" if rmin < 90 else "---",
-        avoid_side= avoid.upper(),
-        px=f"{pose[0]:+.3f}", py=f"{pose[1]:+.3f}",
-        pth=f"{pose[2]:+.3f}", pth_deg=f"{np.degrees(pose[2]):+.1f}",
-        h_err     = f"{h_err:+.3f}",
-        progress  = prog,
-        left_m    = f"{lm:.1f}m" if lm<90 else "---",
-        right_m   = f"{rm:.1f}m" if rm<90 else "---",
-        leds0=leds[0], leds2=leds[2], leds4=leds[4],
-        leds6=leds[6], leds7=leds[7],
-        loop_ms   = f"{timing.get('loop_ms',0):.0f}",
-        lidar_hz  = f"{timing.get('lidar_hz',0):.1f}",
-        throttle  = f"{throttle:+.3f}",
-        steering  = f"{steering:+.3f}",
-    )
-
+@_app.route('/api/data')
+def api_data():
+    return jsonify(_s.get_json())
 
 @_app.route('/camera')
 def camera():
     return Response(_s.get_cam(), mimetype='image/jpeg',
-                    headers={'Cache-Control':'no-cache'})
+                    headers={'Cache-Control': 'no-store'})
 
 @_app.route('/lidar')
 def lidar():
     return Response(_s.get_lidar(), mimetype='image/png',
-                    headers={'Cache-Control':'no-cache'})
+                    headers={'Cache-Control': 'no-store'})
 
 @_app.route('/depth')
 def depth():
     return Response(_s.get_depth(), mimetype='image/png',
-                    headers={'Cache-Control':'no-cache'})
+                    headers={'Cache-Control': 'no-store'})
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 class Dashboard:
-    """
-    Dashboard.update() is now INSTANT (~0ms).
-    All rendering runs in a background thread at max 5Hz.
-    """
 
     def __init__(self, port: int = 5000):
         self.port          = port
@@ -421,27 +377,21 @@ class Dashboard:
     def start(self):
         import socket, logging
         logging.getLogger('werkzeug').setLevel(logging.ERROR)
-
-        # Start Flask
         t = threading.Thread(
             target=lambda: _app.run(host='0.0.0.0', port=self.port, threaded=True),
             daemon=True,
         )
         t.start()
-
-        # Start render thread
         self._running = True
         self._render_thread = threading.Thread(
             target=self._render_loop, daemon=True, name='dash-render'
         )
         self._render_thread.start()
-
         try:
             ip = socket.gethostbyname(socket.gethostname())
         except Exception:
-            ip = '10.1.77.73'
+            ip = '<jetson-ip>'
         print(f"\n  Dashboard: http://{ip}:{self.port}")
-        print("  Render thread: started (5Hz)")
         print("  Open in your PC browser.\n")
 
     def update(self, detection: dict, pose: np.ndarray,
@@ -449,7 +399,6 @@ class Dashboard:
                leds: list, timing: dict, sm_state: str,
                throttle: float = 0.0, steering: float = 0.0,
                heading_err: float = 0.0):
-        """Push data to shared state — NO rendering, returns instantly."""
         timing = dict(timing)
         timing['throttle']    = throttle
         timing['steering']    = steering
@@ -457,30 +406,20 @@ class Dashboard:
         _s.push(detection, pose, speed_mps, dist_goal, leds, timing, sm_state)
 
     def _render_loop(self):
-        """Background: renders images at max 5Hz. Never blocks main loop."""
         lidar_counter = 0
         while self._running:
-            time.sleep(0.2)  # 5Hz max
-
+            time.sleep(0.2)
             snap = _s.pop_for_render()
             if snap is None:
                 continue
-
             det, frame, pose, sm_state = snap
-
-            # Camera JPEG (~5ms)
-            cam_j = _cam_jpeg(frame)
-
-            # Depth chart via OpenCV (~1ms)
+            cam_j   = _cam_jpeg(frame)
             depth_p = _depth_cv2(det)
-
-            # LiDAR polar plot — only on new scans, max 2Hz (~100ms)
             lidar_p = None
             if det.get('new_lidar_scan', False):
                 lidar_counter += 1
-                if lidar_counter % 2 == 0:  # every other scan = ~2Hz
+                if lidar_counter % 2 == 0:
                     lidar_p = self._lidar_render.render(det)
-
             _s.set_images(cam_j, lidar_p, depth_p)
 
     def stop(self):
