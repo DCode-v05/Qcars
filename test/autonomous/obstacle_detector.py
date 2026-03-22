@@ -291,18 +291,69 @@ class ObstacleDetector:
                 idx += 1
 
             if length >= cfg.VFH_MIN_GAP_BINS:
-                centre_bin = (start + length / 2) % n
-                centre_angle = centre_bin * (2 * np.pi / n)
+                # KEY: pick the best STEERING ANGLE within the gap.
+                # Don't blindly use the gap center — find the point in the
+                # gap closest to forward (0 rad) to bias toward driving forward.
+                start_angle = start * (2 * np.pi / n)
+                end_angle = ((start + length) % n) * (2 * np.pi / n)
+
+                target_angle = self._best_angle_in_gap(
+                    start, length, n)
+
                 gaps.append({
                     'start_bin':  start,
                     'length':     length,
                     'width_deg':  length * cfg.VFH_BIN_WIDTH_DEG,
                     'depth':      depth_sum / length,
                     'depth_min':  depth_min,
-                    'angle':      centre_angle,
+                    'angle':      target_angle,
                 })
 
         return gaps
+
+    def _best_angle_in_gap(self, start_bin, length, n):
+        """Find the angle within the gap closest to forward (0 rad).
+        For wide gaps, this prevents always targeting the gap center
+        when the center is behind but the edges are reachable forward."""
+        # Forward is bin 0 (angle 0)
+        forward_bin = 0
+
+        # Check if forward (bin 0) is inside this gap
+        end_bin = (start_bin + length) % n
+        if length >= n:
+            # Gap covers everything — go forward
+            return 0.0
+
+        # Check if forward_bin is in the gap
+        in_gap = False
+        for i in range(length):
+            if (start_bin + i) % n == forward_bin:
+                in_gap = True
+                break
+
+        if in_gap:
+            return 0.0  # forward is open!
+
+        # Forward not in gap — find the gap edge closest to forward
+        left_edge_bin = start_bin % n
+        right_edge_bin = (start_bin + length - 1) % n
+
+        left_edge_angle = left_edge_bin * (2 * np.pi / n)
+        right_edge_angle = right_edge_bin * (2 * np.pi / n)
+
+        # Normalize to [-pi, pi]
+        def norm(a):
+            while a > np.pi: a -= 2 * np.pi
+            while a < -np.pi: a += 2 * np.pi
+            return a
+
+        left_diff = abs(norm(left_edge_angle))
+        right_diff = abs(norm(right_edge_angle))
+
+        if left_diff < right_diff:
+            return left_edge_angle
+        else:
+            return right_edge_angle
 
     def _filter_passable_gaps(self, gaps):
         passable = []
