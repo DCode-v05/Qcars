@@ -31,10 +31,10 @@ BATTERY_CRIT_V    = 10.0
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DRIVING — car NEVER fully stops (always creeping)
 # ═══════════════════════════════════════════════════════════════════════════════
-THROTTLE           = 0.10       # normal speed
-CREEP_THROTTLE     = 0.04       # minimum creep (never zero except person)
-MAX_STEER_RATE     = np.radians(90)    # 90°/s — faster turning
-STEERING_GAIN      = 1.0               # more aggressive steering
+THROTTLE           = 0.10       # constant speed — same forward AND reverse
+CREEP_THROTTLE     = 0.10       # same as THROTTLE — car never slows down
+MAX_STEER_RATE     = np.radians(120)   # 120°/s — fast response
+STEERING_GAIN      = 1.2               # aggressive steering
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SENSORS
