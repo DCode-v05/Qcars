@@ -32,7 +32,8 @@ import numpy as np
 
 # ── optional hardware ──────────────────────────────────────────
 try:
-    from pal.products.qcar import QCarLidar
+    from pal.products.qcar import Q
+CarLidar
     from quanser.hardware import HIL, EncoderQuadratureMode
     from quanser.hardware.exceptions import HILError
     HARDWARE = True
@@ -42,24 +43,24 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════
 #  CALIBRATION
 # ══════════════════════════════════════════════════════════════
-FRONT_CENTER_DEG = 180.0
+FRONT_CENTER_DEG = 200.0
 REAR_CENTER_DEG  = (FRONT_CENTER_DEG + 180.0) % 360.0
 
 # ══════════════════════════════════════════════════════════════
 #  SAFETY & MOTION
 # ══════════════════════════════════════════════════════════════
-UNSAFE_M         = 1.00
-MODERATE_M       = 2.0
+UNSAFE_M         = 0.50
+MODERATE_M       = 1.00
 MAX_RANGE_M      = 6.0
 
-DRIVE_THROTTLE   =  0.1
-REVERSE_THROTTLE = -0.1
-MAX_STEER_RAD    =  1.39
-STEER_GAIN       =  0.3
+DRIVE_THROTTLE   =  0.12
+REVERSE_THROTTLE = -0.12
+MAX_STEER_RAD    =  0.40
+STEER_GAIN       =  0.6
 
-FORWARD_ARC_DEG  = 20.0
+FORWARD_ARC_DEG  = 60.0
 BLOCKED_FRAC     = 0.80
-GAP_SEARCH_DEG   = 180.0
+GAP_SEARCH_DEG   = 150.0
 
 # ══════════════════════════════════════════════════════════════
 #  HARDWARE CONFIG
@@ -72,7 +73,7 @@ ENCODER_CH       = 0
 MOTOR_CH         = np.array([THROTTLE_CH, STEERING_CH], dtype=np.uint32)
 ENC_CH           = np.array([ENCODER_CH],               dtype=np.uint32)
 NUM_MEASUREMENTS = 384
-RANGING_MODE     = 0
+RANGING_MODE     = 2
 INTERP_MODE      = 0
 LOOP_HZ          = 8
 LOOP_PERIOD      = 1.0 / LOOP_HZ
@@ -457,6 +458,7 @@ def arc_blocked(distances, angles_rad, center_deg, half_deg, thresh, frac):
         return False
     return (distances[valid] <= thresh).sum() / valid.sum() >= frac
 
+
 def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     cr   = math.radians(travel_center_deg)
     hr   = math.radians(search_half_deg)
@@ -691,8 +693,8 @@ def main():
             # ── LiDAR read ────────────────────────────────────
             if HARDWARE and lidar:
                 lidar.read()
-                distances  = lidar.distances.flatten()
-                angles_rad = lidar.angles.flatten()
+                distances  = lidar.distances.flatten().copy()
+                angles_rad = lidar.angles.flatten().copy()
             else:
                 distances, angles_rad = demo_scan()
 

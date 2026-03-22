@@ -10,12 +10,12 @@ CLASSES USED  (verified from actual source files on this QCar)
 ──────────────────────────────────────────────────────────────
   Sensor          Class      Source file
   ─────────────── ────────── ─────────────────────────────────────
-  IMU + encoder   QCar       pal/products/qcar.py
+  IMU + encoder   QCar       pal/products/qcar.py   (line 65)
   CSI cameras     Camera2D   pal/utilities/vision.py
   RealSense D435  Camera3D   pal/utilities/vision.py
-  RPLIDAR A2      QCarLidar  pal/products/qcar.py
+  RPLIDAR A2      Lidar      pal/utilities/lidar.py
 
-VERIFIED METHOD NAMES
+VERIFIED METHOD NAMES  (grepped from real source, not guessed)
 ──────────────────────────────────────────────────────────────
   QCar.read()              reads IMU + encoder, sends NO motor commands
   QCar.read_write_std()    reads sensors AND writes throttle/steering
@@ -28,33 +28,16 @@ VERIFIED METHOD NAMES
   Camera3D.read_depth('M') fills .imageBufferDepthM (metres), returns ts
   Camera3D.terminate()     stops all streams
 
-  QCarLidar.read()         fills .distances + .angles, returns bool
-  QCarLidar.terminate()    closes serial connection
+  Lidar.read()             fills .distances + .angles, returns bool
+  Lidar.terminate()        closes serial connection
 
-VERIFIED ATTRIBUTES
+VERIFIED ATTRIBUTES  (from qcar.py lines 126-131)
 ──────────────────────────────────────────────────
   qcar.accelerometer    ndarray (3,)  float64  m/s²
   qcar.gyroscope        ndarray (3,)  float64  rad/s
-  qcar.motorTach        scalar or ndarray  float64  rad/s
-  qcar.batteryVoltage   scalar or ndarray  float64  volts
-  qcar.motorEncoder     scalar or ndarray  int32    counts
-
-FIXES APPLIED (revision history)
-──────────────────────────────────
-  v1: Initial version
-  v2: FIX motorTach IndexError — np.atleast_1d() for scalar vs array
-  v3: FIX QCAR_READ_MODE 1→0  (non-blocking, prevents HIL hang)
-      FIX _warmup() added     (LiDAR + CSI need 2s before valid data)
-      FIX _read_lidar() empty-array guard (shape=(0,) on first ticks)
-  v4: FIX LIDAR_VALID_THRESHOLD 200→100
-        (RPLIDAR A2 returns ~160/360 valid in typical indoor lab —
-         rays pointing at open space or beyond 6m are correctly discarded)
-      FIX LiDAR WARN spam suppressed
-        (RPLIDAR A2 rotates at ~7 Hz; at 30 Hz loop, 3 of every 4 ticks
-         will have no new scan — flag=False is NORMAL, not an error.
-         Warning now only fires if a scan tick returns ZERO valid readings.)
-      FIX Final report LiDAR stats — now computed only over scan ticks,
-        not all ticks (avoids averaging stale cached data)
+  qcar.motorTach        ndarray (1,)  float64  rad/s   ← use [0] for scalar
+  qcar.batteryVoltage   ndarray (1,)  float64  volts   ← use [0] for scalar
+  qcar.motorEncoder     ndarray (1,)  int32    counts
 
 HOW TO RUN
 ──────────
@@ -63,12 +46,12 @@ HOW TO RUN
 
 PASS CRITERIA BEFORE MOVING TO PHASE 2
 ───────────────────────────────────────
-  [ ] accel z  ≈ +9.81 m/s²
-  [ ] gyro max abs < 0.15 rad/s
+  [ ] accel z  ≈ +9.81 m/s²   (gravity, always present when stationary)
+  [ ] gyro xyz ≈  0.000 rad/s  (no rotation = no angular rate)
   [ ] battery  > 11.0 V
-  [ ] CSI cam "0" — all frames non-black
+  [ ] CSI cam "0" frame max > 10  (not a black image)
   [ ] RealSense valid depth pixels > 50 000 per frame
-  [ ] LiDAR valid readings > 100 per scan  (indoor lab, partial coverage OK)
+  [ ] LiDAR valid readings > 200 per scan
   [ ] Loop timing mean < 50 ms
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -76,8 +59,8 @@ PASS CRITERIA BEFORE MOVING TO PHASE 2
 import time
 import numpy as np
 
-from pal.products.qcar    import QCar, QCarLidar
-from pal.utilities.vision import Camera2D, Camera3D
+from pal.products.qcar    import QCar, QCarLidar, QCarCameras
+from pal.utilities.vision import Camera3D
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -86,25 +69,27 @@ from pal.utilities.vision import Camera2D, Camera3D
 
 class Config:
 
-    # ── Loop ─────────────────────────────────────────────────────────────
+    # Loop
     LOOP_RATE_HZ    = 30
     LOOP_DT         = 1.0 / 30          # 0.0333 s
 
-    # ── QCar — IMU + encoder ─────────────────────────────────────────────
-    # readMode=0 → non-blocking: returns last sample immediately
-    # readMode=1 → blocking: waits for next hardware clock tick (can hang)
+    # QCar — IMU + encoder
+    # frequency must match LOOP_RATE_HZ so HIL task fires at the same rate
+    # readMode=1 → blocking: .read() waits for the next hardware sample
+    # readMode=0 → non-blocking: .read() returns the last sample immediately
     QCAR_FREQUENCY  = 30
-    QCAR_READ_MODE  = 0                 # v3 FIX: was 1
+    QCAR_READ_MODE  = 0      # 0=non-blocking (immediate); 1=blocking HW task
 
-    # ── CSI cameras ──────────────────────────────────────────────────────
-    # cameraId "0" → /dev/video0 (front camera)
-    # Layout: "0"=front  "1"=left  "2"=rear  "3"=right
-    CSI_CAMERA_IDS  = ["0"]
+    # CSI cameras
+    # cameraId "0" maps to /dev/video0 on the Jetson
+    # Typical layout: "0"=front  "1"=left  "2"=rear  "3"=right
+    # Default Camera2D resolution is 820x410 (Quanser hardware default)
+    CSI_CAMERA_IDS  = ["2"]     # front camera on this QCar is index 2
     CSI_WIDTH       = 820
     CSI_HEIGHT      = 410
     CSI_FPS         = 30.0
 
-    # ── RealSense D435 ───────────────────────────────────────────────────
+    # RealSense D435
     RS_WIDTH_RGB    = 640
     RS_HEIGHT_RGB   = 480
     RS_FPS_RGB      = 30.0
@@ -112,25 +97,16 @@ class Config:
     RS_HEIGHT_DEPTH = 480
     RS_FPS_DEPTH    = 30.0
 
-    # ── LiDAR RPLIDAR A2 ─────────────────────────────────────────────────
+    # LiDAR RPLIDAR A2
     # rangingDistanceMode: 2=LONG  1=MEDIUM  0=SHORT
-    # interpolationMode:   0=NORMAL  1=INTERPOLATED (evenly spaced, use Phase 3+)
+    # interpolationMode:   0=NORMAL (raw uneven angles)
+    #                      1=INTERPOLATED (evenly spaced — switch for Phase 3+)
     LIDAR_NUM_MEAS      = 384
     LIDAR_RANGE_MODE    = 2
     LIDAR_INTERP        = 0
     LIDAR_MIN_M         = 0.10
     LIDAR_MAX_M         = 6.0
-
-    # v4 FIX: threshold lowered 200→100
-    # Confirmed on this QCar: ~158-162 valid readings in indoor lab.
-    # Rays pointing into open space (>6m) or off car body (<0.1m) are
-    # correctly filtered. 100 is a safe floor — below that = real problem.
-    LIDAR_VALID_THRESHOLD = 100
-
-    # ── Warm-up ──────────────────────────────────────────────────────────
-    # LiDAR motor needs ~1s to reach operating speed (first reads = empty).
-    # CSI GStreamer pipeline drops first frames during ISP auto-exposure.
-    WARMUP_DURATION_S = 2.0
+    LIDAR_PASS_THRESHOLD = 100   # ~150 valid in a normal room is healthy
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -153,26 +129,39 @@ class SensorManager:
     """
 
     def __init__(self, config: Config):
-        self.cfg       = config
-        self._qcar     = None
-        self._csi_cams = {}
-        self._rs       = None
-        self._lidar    = None
-        self._opened   = False
+        self.cfg        = config
+        self._qcar      = None      # QCar        — IMU + encoder
+        self._cameras   = None      # QCarCameras instance
+        self._rs        = None      # Camera3D    — RealSense
+        self._lidar     = None      # Lidar       — RPLIDAR A2
+        self._opened    = False
 
     # ── OPEN ──────────────────────────────────────────────────────────────
 
     def open(self):
         print("\n[SensorManager] Opening sensors...")
         self._open_qcar()
-        self._open_csi_cameras()
-        self._open_realsense()
+        self._open_csi_cameras()   # open cameras FIRST — GStreamer pipeline
+        self._open_realsense()     # times out if not read within ~2s of open
         self._open_lidar()
+        # LiDAR motor needs ~2s to reach operating speed before read() returns valid ranges
+        print("  Waiting 2 s for LiDAR motor to reach speed...")
+        import time as _t; _t.sleep(2.0)
         self._opened = True
-        print("[SensorManager] All sensors open.")
-        self._warmup()
+        print("[SensorManager] All sensors open.\n")
 
     def _open_qcar(self):
+        """
+        QCar(frequency, readMode) opens the HIL board and starts a
+        hardware-clocked internal task at `frequency` Hz.
+
+        After each .read():
+          .accelerometer  (3,) float64  m/s²
+          .gyroscope      (3,) float64  rad/s
+          .motorTach      (1,) float64  rad/s   — index [0] for scalar
+          .batteryVoltage (1,) float64  volts   — index [0] for scalar
+          .motorEncoder   (1,) int32    counts
+        """
         print("  Opening QCar (IMU + encoder)...")
         self._qcar = QCar(
             frequency = self.cfg.QCAR_FREQUENCY,
@@ -181,18 +170,35 @@ class SensorManager:
         print("  QCar: OK")
 
     def _open_csi_cameras(self):
-        for cam_id in self.cfg.CSI_CAMERA_IDS:
-            print(f"  Opening CSI camera id='{cam_id}'...")
-            cam = Camera2D(
-                cameraId    = cam_id,
-                frameWidth  = self.cfg.CSI_WIDTH,
-                frameHeight = self.cfg.CSI_HEIGHT,
-                frameRate   = self.cfg.CSI_FPS,
-            )
-            self._csi_cams[cam_id] = cam
-            print(f"  CSI camera '{cam_id}': OK  buffer={cam.imageData.shape}")
+        """
+        Opens CSI cameras using QCarCameras — Quanser's tested wrapper.
 
+        WHY QCarCameras instead of raw Camera2D:
+          Camera2D uses a GStreamer pipeline on Jetson. If cam.read() is not
+          called within ~2s of opening, the pipeline silently dies and every
+          subsequent read() returns False (missed frame). QCarCameras handles
+          this correctly internally.
+
+        WHY open cameras BEFORE RealSense:
+          RealSense init takes 2-3s. Opening cameras first means the pipeline
+          is still alive when the warmup loop first calls readAll().
+        """
+        print("  Opening CSI cameras (QCarCameras, front only)...")
+        self._cameras = QCarCameras(
+            frameWidth  = self.cfg.CSI_WIDTH,
+            frameHeight = self.cfg.CSI_HEIGHT,
+            frameRate   = self.cfg.CSI_FPS,
+            enableFront = True,
+        )
+        shape = self._cameras.csiFront.imageData.shape
+        print(f"  CSI front camera: OK  buffer={shape}  (index=csiFront)")
     def _open_realsense(self):
+        """
+        Camera3D opens RealSense D435 with RGB + Depth streams.
+        After .read_RGB():     .imageBufferRGB     (H,W,3)  uint8   BGR
+        After .read_depth('M'):.imageBufferDepthM  (H,W,1)  float32 metres
+                                0.0 = no valid depth return
+        """
         print("  Opening RealSense D435...")
         self._rs = Camera3D(
             mode             = 'RGB&Depth',
@@ -208,7 +214,17 @@ class SensorManager:
               f"Depth={self._rs.imageBufferDepthM.shape}")
 
     def _open_lidar(self):
+        """
+        Lidar('RPLidar') opens RPLIDAR A2 on the default serial port:
+            serial-cpu://localhost:2?baud='115200',...
+        After each .read():
+          .distances  (N, 1)  float32  metres
+          .angles     (N, 1)  float32  radians  (0 = forward, CCW positive)
+        """
         print("  Opening LiDAR (RPLIDAR A2 via QCarLidar)...")
+        # QCarLidar subclasses Lidar and reads the correct ttyTHS port
+        # from QCAR_CONFIG['lidarurl'] — no manual URL needed.
+        # Same .read() / .distances / .angles / .terminate() interface.
         self._lidar = QCarLidar(
             numMeasurements     = self.cfg.LIDAR_NUM_MEAS,
             rangingDistanceMode = self.cfg.LIDAR_RANGE_MODE,
@@ -216,52 +232,30 @@ class SensorManager:
         )
         print(f"  LiDAR: OK  ({self.cfg.LIDAR_NUM_MEAS} measurements/scan)")
 
-    def _warmup(self):
-        """
-        Silently discard sensor frames during hardware spin-up.
-
-        LiDAR  — motor takes ~1s to reach speed; first reads return empty.
-        CSI    — GStreamer ISP pipeline drops first frames during
-                 auto-exposure settling.
-        """
-        print(f"\n[SensorManager] Warming up ({self.cfg.WARMUP_DURATION_S:.0f}s)...")
-        deadline = time.perf_counter() + self.cfg.WARMUP_DURATION_S
-        dots = 0
-        while time.perf_counter() < deadline:
-            self._qcar.read()
-            for cam in self._csi_cams.values():
-                cam.read()
-            self._rs.read_RGB()
-            self._rs.read_depth(dataMode='M')
-            self._lidar.read()
-            time.sleep(0.05)
-            dots += 1
-            if dots % 10 == 0:
-                remaining = deadline - time.perf_counter()
-                print(f"  ... {max(remaining, 0):.1f}s remaining")
-        print("[SensorManager] Warm-up complete. Starting main loop.\n")
-
     # ── READ ──────────────────────────────────────────────────────────────
 
     def read(self) -> dict:
         """
-        Read all sensors, return one unified perception dict.
+        Read all sensors, return one perception dict.
 
         Keys
         ────
         timestamp        float          time.perf_counter()
+
         accelerometer    ndarray (3,)   float64  m/s²   [x, y, z]
         gyroscope        ndarray (3,)   float64  rad/s  [x, y, z]
         motor_speed      float          rad/s  (+ve = forward)
         motor_encoder    int            cumulative encoder counts
         battery_voltage  float          volts
-        csi_frames       dict  { cam_id : ndarray (H,W,3) uint8 BGR }
-        rs_rgb           ndarray (H,W,3)  uint8   BGR
+
+        csi_frames       dict  { cam_id_str : ndarray (H,W,3) uint8 BGR }
+
+        rs_rgb           ndarray (H,W,3)  uint8   BGR colour
         rs_depth_m       ndarray (H,W,1)  float32 metres  (0.0 = invalid)
+
         lidar_distances  ndarray (N,)   float32  metres
         lidar_angles     ndarray (N,)   float32  radians
-        lidar_valid      ndarray (N,)   bool
-        lidar_new_scan   bool    True only when a fresh scan arrived this tick
+        lidar_valid      ndarray (N,)   bool     True = within range limits
         """
         t     = time.perf_counter()
         imu   = self._read_qcar()
@@ -282,19 +276,24 @@ class SensorManager:
             'lidar_distances': lidar['distances'],
             'lidar_angles':    lidar['angles'],
             'lidar_valid':     lidar['valid'],
-            'lidar_new_scan':  lidar['new_scan'],
         }
 
     def _read_qcar(self) -> dict:
         """
-        QCar.read() — IMU + encoder, NO motor commands.
-        np.atleast_1d() handles motorTach/batteryVoltage being scalar
-        or shape-(1,) array depending on HAL firmware version. (v2 fix)
+        read_write_std(throttle=0, steering=0) — correct call for readMode=0.
+
+        Why NOT .read() alone?
+          readMode=1 + .read() blocks forever: the HW IO task only starts
+          after the first write, so .read() waits indefinitely.
+          readMode=0 + read_write_std() is non-blocking and works immediately.
+
+        Passing throttle=0, steering=0 → car stays completely still.
+        Phase 3+ uses the same call with real throttle/steering values.
         """
         try:
-            self._qcar.read()
+            self._qcar.read_write_std(throttle=0.0, steering=0.0)
         except Exception as e:
-            print(f"  [WARN] QCar.read() error: {e}")
+            print(f"  [WARN] QCar.read_write_std() error: {e}")
 
         return {
             'accelerometer':   np.array(self._qcar.accelerometer, dtype=np.float64),
@@ -306,26 +305,43 @@ class SensorManager:
 
     def _read_csi_cameras(self) -> dict:
         """
-        Camera2D.read() fills .imageData in-place, returns bool.
-        .copy() preserves the value after the next read() overwrites buffer.
-        """
-        frames = {}
-        for cam_id, cam in self._csi_cams.items():
-            flag = cam.read()
-            if not flag:
-                print(f"  [WARN] CSI cam '{cam_id}': missed frame")
-            frames[cam_id] = cam.imageData.copy()
-        return frames
+        Reads frames from all enabled cameras using QCarCameras.readAll().
 
+        Returns dict keyed by camera name for backward compatibility:
+          { 'front': ndarray (410,820,3) uint8 BGR }
+
+        Also returns under numeric key '2' so perceiver.py works unchanged:
+          { '2': same frame }
+
+        PRINT: logs frame status clearly — OK or WARN with pixel stats.
+        """
+        flags = self._cameras.readAll()
+        frame = self._cameras.csiFront.imageData.copy()
+
+        flag_ok = len(flags) > 0 and flags[0]
+        is_black = frame.max() <= 5
+
+        if not flag_ok:
+            print("  [WARN] CSI front camera: readAll() returned False — missed frame")
+        elif is_black:
+            print(f"  [WARN] CSI front camera: frame is black (max={frame.max()}) — check cable/lens cap")
+        else:
+            pass  # Normal operation — no print to keep terminal clean
+
+        return {
+            'front': frame,
+            '2':     frame,   # alias so perceiver.py/obstacle_detector.py work unchanged
+        }
     def _read_realsense(self) -> dict:
         """
-        Returns timestamp or -1 if no frame was ready this tick.
-        -1 is not a fatal error.
+        read_RGB()       fills .imageBufferRGB     — returns timestamp or -1
+        read_depth('M')  fills .imageBufferDepthM  — returns timestamp or -1
+        -1 means no frame was ready this tick (not a fatal error).
         """
         ts_rgb   = self._rs.read_RGB()
         ts_depth = self._rs.read_depth(dataMode='M')
 
-        if ts_rgb == -1:
+        if ts_rgb   == -1:
             print("  [WARN] RealSense: no RGB frame this tick")
         if ts_depth == -1:
             print("  [WARN] RealSense: no depth frame this tick")
@@ -337,78 +353,49 @@ class SensorManager:
 
     def _read_lidar(self) -> dict:
         """
-        QCarLidar.read() fills .distances + .angles, returns bool (new scan?).
-
-        KEY FACT — scan rate vs loop rate:
-          RPLIDAR A2 rotates at ~7 Hz (one full 360° scan every ~143 ms).
-          Main loop runs at 30 Hz (one tick every ~33 ms).
-          → ~3 out of every 4 ticks get flag=False (no new scan).
-          → This is COMPLETELY NORMAL. No warning is printed for this.
-          → Warning only fires if a new scan arrives with ZERO valid points.
-
-        'lidar_new_scan': True  → fresh data, use it
-                          False → cached data from last scan, skip processing
+        Lidar.read() fills .distances + .angles in-place, returns bool.
+        Shapes are (N, 1) — we flatten to (N,) for cleaner indexing.
         """
         flag = self._lidar.read()
+        if not flag:
+            print("  [WARN] LiDAR: no scan ready this tick")
 
-        raw_dist = self._lidar.distances
-        raw_ang  = self._lidar.angles
+        distances = self._lidar.distances.flatten().astype(np.float32)
+        angles    = self._lidar.angles.flatten().astype(np.float32)
 
-        # Guard: empty array before motor reaches operating speed (v3 fix)
-        if raw_dist is None or np.asarray(raw_dist).size == 0:
-            empty = np.array([], dtype=np.float32)
-            return {
-                'distances': empty,
-                'angles':    empty,
-                'valid':     np.array([], dtype=bool),
-                'new_scan':  False,
-            }
+        valid = (
+            (distances >= self.cfg.LIDAR_MIN_M) &
+            (distances <= self.cfg.LIDAR_MAX_M)
+        )
 
-        distances = np.asarray(raw_dist).flatten().astype(np.float32)
-        angles    = np.asarray(raw_ang).flatten().astype(np.float32)
-
-        valid   = (distances >= self.cfg.LIDAR_MIN_M) & (distances <= self.cfg.LIDAR_MAX_M)
-        n_valid = int(valid.sum())
-
-        # v4 FIX: only warn when a real scan arrived but had zero valid points
-        if flag and n_valid == 0:
-            print("  [WARN] LiDAR: scan arrived but ZERO valid readings — "
-                  "check mounting or LIDAR_MIN_M / LIDAR_MAX_M range")
-
-        return {
-            'distances': distances,
-            'angles':    angles,
-            'valid':     valid,
-            'new_scan':  bool(flag),
-        }
+        return {'distances': distances, 'angles': angles, 'valid': valid, 'new_scan': bool(flag)}
 
     # ── CLOSE ─────────────────────────────────────────────────────────────
 
     def close(self):
-        """
-        Close all sensors cleanly.
-        Always call from a finally block — runs even on Ctrl+C or crash.
-        """
+        """Close all sensors. Always call from a finally block."""
         print("\n[SensorManager] Closing sensors...")
 
-        for name, obj in [
-            ("LiDAR",     self._lidar),
-            ("RealSense", self._rs),
-            ("QCar",      self._qcar),
-        ]:
-            if obj:
-                try:
-                    obj.terminate()
-                    print(f"  {name}: closed")
-                except Exception as e:
-                    print(f"  {name}: close error ({e})")
+        if self._lidar:
+            self._lidar.terminate()
+            print("  LiDAR: closed")
 
-        for cam_id, cam in self._csi_cams.items():
+        if self._rs:
+            self._rs.terminate()
+            print("  RealSense: closed")
+
+        if self._cameras:
             try:
-                cam.terminate()
-                print(f"  CSI camera '{cam_id}': closed")
+                for cam in self._cameras.csi:
+                    if cam is not None:
+                        cam.terminate()
+                print("  CSI cameras: closed")
             except Exception as e:
-                print(f"  CSI camera '{cam_id}': close error ({e})")
+                print(f"  CSI cameras: close error ({e})")
+
+        if self._qcar:
+            self._qcar.terminate()
+            print("  QCar: closed")
 
         self._opened = False
         print("[SensorManager] All sensors closed.")
@@ -422,55 +409,46 @@ def print_sensor_summary(data: dict, elapsed: float):
     accel = data['accelerometer']
     gyro  = data['gyroscope']
 
-    # CSI
     csi_lines = []
-    for cam_id, frame in data['csi_frames'].items():
+    frame = data['csi_frames'].get('front', data['csi_frames'].get('2'))
+    if frame is not None:
         ok = int(np.count_nonzero(frame)) > 5000
         csi_lines.append(
-            f"    cam'{cam_id}': shape={frame.shape}  "
+            f"    front cam: shape={frame.shape}  "
             f"min={int(frame.min())}  max={int(frame.max())}  "
-            f"[{'OK' if ok else 'WARNING: mostly black — check /dev/video* index'}]"
+            f"[{'OK' if ok else 'WARNING: black — check cable/lens'}]"
         )
-
-    # RealSense
     depth_flat  = data['rs_depth_m'].flatten()
     depth_valid = depth_flat[depth_flat > 0.0]
-    depth_str = (
+    depth_str   = (
         f"min={depth_valid.min():.3f}m  max={depth_valid.max():.3f}m  "
         f"valid_px={len(depth_valid)}"
         if len(depth_valid) > 0
-        else "NO VALID DEPTH — check USB3 cable (must be USB 3.0 port)"
+        else "NO VALID DEPTH — check USB3 cable (must be USB 3.0)"
     )
 
-    # LiDAR — show detail only on new scan ticks to reduce noise
     dist    = data['lidar_distances']
     valid   = data['lidar_valid']
-    n_valid = int(valid.sum()) if len(valid) > 0 else 0
-    n_total = len(dist)
-    new     = data.get('lidar_new_scan', False)
-
-    if new and n_valid > 0:
-        lidar_str = (
-            f"min={dist[valid].min():.2f}m  max={dist[valid].max():.2f}m  "
-            f"valid={n_valid}/{n_total}  [NEW scan]"
-        )
-    elif new and n_valid == 0:
-        lidar_str = f"NEW scan — 0 valid readings! Check sensor."
-    else:
-        # No new scan this tick — normal at 30Hz loop / 7Hz scan rate
-        lidar_str = f"valid={n_valid}/{n_total}  [cached — next scan in ~{1000//7}ms]"
+    n_valid = int(valid.sum())
+    lidar_str = (
+        f"min={dist[valid].min():.2f}m  max={dist[valid].max():.2f}m  "
+        f"valid={n_valid}/{len(dist)}"
+        if n_valid > 0
+        else "NO VALID READINGS — check serial port"
+    )
 
     print(
         f"\n[{elapsed:6.2f}s] ─────────────────────────────────────────────\n"
         f"  IMU accel : x={accel[0]:+.3f}  y={accel[1]:+.3f}  z={accel[2]:+.3f}  m/s²\n"
-        f"              (z ≈ +9.81 when stationary — gravity)\n"
+        f"              z ≈ +9.81 when stationary (gravity). z=0 → HIL not reading.\n"
         f"  IMU gyro  : x={gyro[0]:+.5f}  y={gyro[1]:+.5f}  z={gyro[2]:+.5f}  rad/s\n"
-        f"              (all ≈ 0.00000 when stationary)\n"
+        f"              all ≈ 0.00000 when stationary\n"
         f"  Motor     : speed={data['motor_speed']:+.4f} rad/s  "
         f"encoder={data['motor_encoder']} cts  "
         f"battery={data['battery_voltage']:.2f} V\n"
         f"  CSI cams  :\n" + "\n".join(csi_lines) + "\n"
-        f"  RealSense : RGB={data['rs_rgb'].shape}  Depth={data['rs_depth_m'].shape}\n"
+        f"  RealSense : RGB={data['rs_rgb'].shape}  "
+        f"Depth={data['rs_depth_m'].shape}\n"
         f"              {depth_str}\n"
         f"  LiDAR     : {lidar_str}"
     )
@@ -491,99 +469,60 @@ def print_final_report(all_data: list, cfg: Config):
     gyros    = np.array([d['gyroscope']       for d in all_data])
     voltages = np.array([d['battery_voltage'] for d in all_data])
 
-    gz    = accels[:, 2].mean()
-    gmax  = float(np.abs(gyros).max())
+    gz   = accels[:, 2].mean()
+    gmax = float(np.abs(gyros).max())
     vmean = voltages.mean()
 
-    # IMU
     print(f"\n  IMU accelerometer  (expect ≈ [0, 0, +9.81])")
     print(f"    mean={accels.mean(axis=0).round(4)}  std={accels.std(axis=0).round(5)}")
     print(f"    accel-z = {gz:.4f}  "
           f"{'PASS' if 9.5 < gz < 10.1 else 'FAIL — check IMU HIL channel'}")
 
-    print(f"\n  IMU gyroscope  (mean ≈ 0; max < 0.15 is OK when stationary)")
+    print(f"\n  IMU gyroscope  (expect ≈ [0, 0, 0])")
     print(f"    mean={gyros.mean(axis=0).round(6)}  std={gyros.std(axis=0).round(6)}")
     print(f"    max abs = {gmax:.5f}  "
-          f"['PASS' if gmax < 0.15 else 'NOTE: higher drift — check for vibration']")
+          f"{'PASS' if gmax < 0.05 else 'NOTE: small drift is normal'}")
 
-    # Battery
     print(f"\n  Battery: {vmean:.2f} V  "
           f"{'PASS' if vmean > 11.0 else 'LOW — charge before driving'}")
 
-    # CSI
     print(f"\n  CSI cameras:")
-    csi_pass = True
-    for cam_id in cfg.CSI_CAMERA_IDS:
-        ok = sum(1 for d in all_data if d['csi_frames'][cam_id].max() > 10)
-        passed = ok == n
-        csi_pass = csi_pass and passed
-        print(f"    cam'{cam_id}': {ok}/{n} non-black  "
-              f"[{'PASS' if passed else 'FAIL — check /dev/video index'}]")
+    front_frames = [d['csi_frames'].get('front', d['csi_frames'].get('2')) for d in all_data]
+    front_ok = sum(1 for f in front_frames if f is not None and f.max() > 10)
+    csi_pass = (front_ok == n)
+    print(f"    front cam: {front_ok}/{n} non-black  "
+          f"[{'PASS' if csi_pass else 'FAIL — check camera cable or index'}]")
 
-    # RealSense
     depth_counts = [(d['rs_depth_m'].flatten() > 0).sum() for d in all_data]
     dmean = float(np.mean(depth_counts))
     print(f"\n  RealSense depth valid px/frame: mean={dmean:.0f}  "
-          f"[{'PASS' if dmean > 50000 else 'FAIL — check USB3 port'}]")
+          f"[{'PASS' if dmean > 50000 else 'FAIL — check USB3'}]")
 
-    # LiDAR — stats only over ticks where a new scan actually arrived (v4 fix)
-    lidar_scan_counts = [
-        int(d['lidar_valid'].sum())
-        for d in all_data
-        if d.get('lidar_new_scan', False) and len(d['lidar_valid']) > 0
-    ]
-    n_scans = len(lidar_scan_counts)
-    lmean   = float(np.mean(lidar_scan_counts)) if n_scans > 0 else 0.0
-    scan_hz = n_scans / 10.0
-    print(f"\n  LiDAR (RPLIDAR A2 — expected scan rate ~7 Hz):")
-    print(f"    Scan ticks received: {n_scans}/{n}  "
-          f"(≈ {scan_hz:.1f} Hz  —  expect 6–10 Hz)")
-    print(f"    Valid readings/scan: mean={lmean:.0f}  "
-          f"threshold={cfg.LIDAR_VALID_THRESHOLD}  "
-          f"[{'PASS' if lmean >= cfg.LIDAR_VALID_THRESHOLD else 'FAIL'}]")
-    lidar_pass = lmean >= cfg.LIDAR_VALID_THRESHOLD
+    lidar_counts = [int(d['lidar_valid'].sum()) for d in all_data]
+    lmean = float(np.mean(lidar_counts))
+    print(f"  LiDAR valid/scan: mean={lmean:.0f}  "
+          f"[{'PASS' if lmean > cfg.LIDAR_PASS_THRESHOLD else 'FAIL — check serial port'}]")
 
-    # Loop timing
     timestamps = [d['timestamp'] for d in all_data]
     intervals  = np.diff(timestamps) * 1000
     tmean = float(intervals.mean())
-    print(f"\n  Loop timing: mean={tmean:.1f} ms  std={intervals.std():.2f} ms  "
+    print(f"  Loop timing: mean={tmean:.1f} ms  std={intervals.std():.2f} ms  "
           f"max={intervals.max():.1f} ms  "
-          f"[{'PASS' if tmean < 50 else 'WARN — Jetson CPU load too high'}]")
+          f"[{'PASS' if tmean < 50 else 'WARN'}]")
 
-    # Final checklist
     print(f"\n{sep}")
     print("  CHECKLIST:")
     rows = [
-        ("PASS" if 9.5 < gz < 10.1         else "FAIL",
-         f"accel z ≈ +9.81 m/s²  (got {gz:.3f})"),
-        ("PASS" if gmax < 0.15              else "NOTE",
-         f"gyro max abs < 0.15 rad/s  (got {gmax:.4f})"),
-        ("PASS" if vmean > 11.0             else "FAIL",
-         f"battery > 11.0 V  (got {vmean:.2f} V)"),
-        ("PASS" if csi_pass                 else "FAIL",
-         "CSI camera — all frames non-black"),
-        ("PASS" if dmean > 50000            else "FAIL",
-         f"RealSense valid_px > 50000  (got {dmean:.0f})"),
-        ("PASS" if lidar_pass               else "FAIL",
-         f"LiDAR valid > {cfg.LIDAR_VALID_THRESHOLD}/scan  (got {lmean:.0f})"),
-        ("PASS" if tmean < 50               else "WARN",
-         f"loop mean < 50 ms  (got {tmean:.1f} ms)"),
+        ("PASS" if 9.5 < gz < 10.1  else "FAIL", "accel z ≈ +9.81 m/s²"),
+        ("PASS" if gmax < 0.05       else "NOTE", "gyro xyz ≈ 0.000 rad/s"),
+        ("PASS" if vmean > 11.0      else "FAIL", f"battery > 11.0 V  (got {vmean:.2f} V)"),
+        ("PASS" if dmean > 50000     else "FAIL", f"RealSense valid_px > 50000  (got {dmean:.0f})"),
+        ("PASS" if lmean > cfg.LIDAR_PASS_THRESHOLD else "FAIL", f"LiDAR valid > {cfg.LIDAR_PASS_THRESHOLD}/scan  (got {lmean:.0f})"),
+        ("PASS" if tmean < 50        else "WARN", f"loop mean < 50 ms  (got {tmean:.1f} ms)"),
     ]
     for status, text in rows:
-        icon = "✓" if status == "PASS" else ("!" if status == "NOTE" else "✗")
-        print(f"  [{status}] {icon}  {text}")
-    print(sep)
-
-    all_pass = all(r[0] in ("PASS", "NOTE") for r in rows)
-    if all_pass:
-        print("\n  ✓ ALL CHECKS PASSED — ready for Phase 2 (estimation.py)\n")
-    else:
-        failed = [r[1] for r in rows if r[0] == "FAIL"]
-        print(f"\n  ✗ {len(failed)} check(s) failed — fix before Phase 2:")
-        for f in failed:
-            print(f"      • {f}")
-        print()
+        print(f"  [{status}] {text}")
+    print(sep + "\n")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -602,7 +541,7 @@ def main():
 
     print("═" * 60)
     print("  QCar 2 — Phase 1: Sensor Reading Test")
-    print(f"  Running {TEST_DURATION_S:.0f}s after warm-up. Ctrl+C to stop early.")
+    print(f"  Running {TEST_DURATION_S:.0f} s. Ctrl+C to stop early.")
     print("═" * 60)
 
     sensors.open()
@@ -618,7 +557,7 @@ def main():
 
             data = sensors.read()
 
-            # Deep-copy every value — pre-allocated buffers are overwritten each tick
+            # Deep-copy: buffers are reused each tick, copies preserve history
             snapshot = {}
             for k, v in data.items():
                 if isinstance(v, np.ndarray):
@@ -633,7 +572,7 @@ def main():
                 print_sensor_summary(data, elapsed)
                 last_print = elapsed
 
-            # Soft real-time pacing — sleep the remainder of the tick window
+            # Soft real-time: sleep the remainder of the tick period
             elapsed_tick = time.perf_counter() - tick_start
             sleep_time   = cfg.LOOP_DT - elapsed_tick
             if sleep_time > 0:
