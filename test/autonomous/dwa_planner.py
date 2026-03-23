@@ -146,24 +146,29 @@ class DWAPlanner:
         min_clearance = float('inf')
         margin = cfg.DWA_COLLISION_MARGIN
         collides = False
+        n_pts = len(trajectory)
+        # Only check the LAST portion of the trajectory for hard collisions.
+        # Early points are the "turning maneuver" where the car passes
+        # close to obstacles it's steering away from. What matters is
+        # where the car ENDS UP, not the transition path.
+        check_start = max(1, n_pts - 1)  # only the final endpoint
 
-        for (x, y, _) in trajectory:
+        for step_i, (x, y, _) in enumerate(trajectory):
             dist_from_car = math.sqrt(x * x + y * y)
-            if dist_from_car < 0.02:
-                continue  # skip origin
+            if dist_from_car < 0.03:
+                continue
 
-            # Convert trajectory point to polar (bearing from car)
             angle = math.atan2(y, x) % (2 * math.pi)
             bin_idx = int(angle / (2 * math.pi) * n_bins) % n_bins
 
-            # Check this bin and immediate neighbours
             for offset in range(-1, 2):
                 b = (bin_idx + offset) % n_bins
                 obstacle_dist = histogram[b]
                 clearance = obstacle_dist - dist_from_car
                 if clearance < min_clearance:
                     min_clearance = clearance
-                if clearance < margin:
+                # Only flag collision for the second half of trajectory
+                if step_i >= check_start and clearance < margin:
                     collides = True
 
         return (not collides), min_clearance

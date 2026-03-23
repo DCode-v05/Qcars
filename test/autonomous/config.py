@@ -110,18 +110,18 @@ VFH_DIST_DECAY     = 2.0
 #  DWA PATH PLANNER — samples Ackermann trajectories, checks against histogram
 # ═══════════════════════════════════════════════════════════════════════════════
 DWA_SPEED_MPS       = 0.4        # estimated car speed at THROTTLE=0.10
-DWA_SIM_TIME_S      = 0.6        # simulate 0.6s into the future
-DWA_SIM_STEPS       = 6          # 6 steps = 0.1s per step
+DWA_SIM_TIME_S      = 1.5        # simulate 1.5s — enough to turn 75° at max steer
+DWA_SIM_STEPS       = 8          # 8 steps
 DWA_NUM_STEER_FWD   = 21         # forward samples: -30° to +30° in 3° steps
 DWA_NUM_STEER_REV   = 7          # reverse samples: -30° to +30° in 10° steps
 DWA_COLLISION_MARGIN = 0.05              # radial safety buffer (histogram already inflates angularly)
 
-# Scoring weights
-DWA_W_PROGRESS      = 0.25       # reward forward distance travelled
-DWA_W_GOAL          = 0.20       # reward alignment with goal heading
+# Scoring weights — forward/side STRONGLY preferred over reverse
+DWA_W_PROGRESS      = 0.20       # reward forward distance travelled
+DWA_W_GOAL          = 0.15       # reward alignment with goal heading
 DWA_W_CLEARANCE     = 0.20       # reward distance from obstacles
-DWA_W_SMOOTH        = 0.10       # reward smooth steering transitions
-DWA_W_FORWARD       = 0.25       # reward forward over reverse
+DWA_W_SMOOTH        = 0.05       # reward smooth steering (low so side-steer beats straight)
+DWA_W_FORWARD       = 0.40       # strong forward bias — side gap always beats reverse
 
 # Stuck detection & recovery
 STUCK_THRESHOLD      = 60         # ticks at near-max-lock → stuck (~2s at 30Hz)

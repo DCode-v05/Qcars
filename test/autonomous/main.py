@@ -14,6 +14,7 @@ USAGE:
     python main.py --model $MODELSPATH/yolov8n.pt --dashboard
 """
 import argparse
+import atexit
 import os
 import queue
 import select
@@ -34,28 +35,26 @@ from obstacle_detector import ObstacleDetector
 from navigator import Navigator
 
 
-_shutdown = False
+_shutdown = threading.Event()
 _nav_ref = None  # reference to navigator for key commands
 
 
 def _signal_handler(signum, frame):
-    global _shutdown
-    _shutdown = True
+    _shutdown.set()
     print(f"\n[main] Signal {signum} — shutting down...")
 
 
 def _key_listener():
     """Background thread: handles keyboard input.
     q = quit, d = drive forward, r = reverse, a = auto."""
-    global _shutdown
     old_settings = termios.tcgetattr(sys.stdin)
     try:
         tty.setcbreak(sys.stdin.fileno())
-        while not _shutdown:
+        while not _shutdown.is_set():
             if select.select([sys.stdin], [], [], 0.1)[0]:
                 ch = sys.stdin.read(1).lower()
                 if ch == 'q':
-                    _shutdown = True
+                    _shutdown.set()
                     print("\n[main] 'q' pressed — shutting down...")
                     break
                 elif ch == 'd':
@@ -73,11 +72,32 @@ def _key_listener():
     except Exception:
         pass
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        try:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
+
+
+def _force_shutdown(sensors, yolo, dash):
+    """Last-resort cleanup registered with atexit. Ensures hardware is zeroed."""
+    try:
+        zero_leds = np.zeros(8, dtype=np.float64)
+        sensors.write_command(throttle=0.0, steering=0.0, leds=zero_leds)
+    except Exception:
+        pass
+    try:
+        sensors.close()
+    except Exception:
+        pass
+    if yolo:
+        try:
+            yolo.stop()
+        except Exception:
+            pass
 
 
 def main():
-    global _shutdown, _nav_ref
+    global _nav_ref
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -133,6 +153,9 @@ def main():
     # ── Open hardware ─────────────────────────────────────────────────────
     sensors.open()
 
+    # Register atexit AFTER hardware is open — guarantees cleanup even on crash
+    atexit.register(_force_shutdown, sensors, yolo, dash)
+
     if yolo:
         yolo.start()
         logging.info("[main] YOLO processor started")
@@ -155,13 +178,17 @@ def main():
     print(f"\n[main] Running. Press 'q' to stop.\n")
 
     try:
-        while not _shutdown:
+        while not _shutdown.is_set():
             tick_start = time.perf_counter()
             elapsed    = tick_start - start_t
 
             # ── 1. Read sensors ───────────────────────────────────────────
             data = sensors.read()
             tick_count += 1
+
+            # Check shutdown between heavy operations
+            if _shutdown.is_set():
+                break
 
             # ── 2. Compute dt ─────────────────────────────────────────────
             now = time.perf_counter()
@@ -199,7 +226,9 @@ def main():
             leds       = nav_result['leds']
 
             if nav_result.get('crash_detected'):
-                print(f"\n[IMU] CRASH DETECTED — reversing!")
+                print(f"\n[IMU] CRASH/IMPACT DETECTED — emergency reverse!")
+            if nav_result.get('oscillation_detected'):
+                print(f"\n[IMU] OSCILLATION DETECTED — recovery mode!")
 
             # ── 7. Send to hardware ───────────────────────────────────────
             sensors.write_command(throttle=throttle, steering=steering,
@@ -251,12 +280,14 @@ def main():
         print("\n[main] Stopped by Ctrl+C.")
 
     finally:
+        _shutdown.set()  # signal all threads
+
         print("\n[SAFETY] Zeroing throttle and steering...")
         try:
             zero_leds = np.zeros(8, dtype=np.float64)
-            sensors.write_command(throttle=0.0, steering=0.0, leds=zero_leds)
-            time.sleep(0.1)
-            sensors.write_command(throttle=0.0, steering=0.0, leds=zero_leds)
+            for _ in range(3):  # send zero command multiple times to be sure
+                sensors.write_command(throttle=0.0, steering=0.0, leds=zero_leds)
+                time.sleep(0.05)
         except Exception as e:
             print(f"  Warning: {e}")
 
@@ -271,6 +302,9 @@ def main():
         print(f"\n  Run time: {total:.1f}s")
         print(f"  Ticks:    {tick_count} ({hz:.1f} Hz)")
         print("[main] Shutdown complete.")
+
+        # Force exit — kills any stuck threads (Flask, YOLO, etc.)
+        os._exit(0)
 
 
 if __name__ == "__main__":
