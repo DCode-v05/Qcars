@@ -38,6 +38,7 @@ from obstacle_detector import ObstacleDetector
 from navigator import Navigator
 from localizer import Localizer
 from occupancy_grid import OccupancyGrid
+from data_recorder import DataRecorder
 from path_planner import PathPlanner
 
 
@@ -112,6 +113,8 @@ def main():
                     help="Goal Y in meters (from start)")
     ap.add_argument("--no-goal", action="store_true",
                     help="Reactive mode only (no A* path planning)")
+    ap.add_argument("--record", action="store_true",
+                    help="Record all sensor data to files")
     args = ap.parse_args()
 
     model_path = os.path.expandvars(args.model)
@@ -138,6 +141,7 @@ def main():
         print(f"  Goal     : ({goal_x:.2f}, {goal_y:.2f}) m")
     else:
         print(f"  Goal     : NONE (reactive mode)")
+    print(f"  Record   : {'ON' if args.record else 'OFF'}")
     print("-" * 62)
     print("  Controls: q=quit  d=drive  r=reverse  a=auto")
     print("-" * 62)
@@ -150,6 +154,8 @@ def main():
     grid      = OccupancyGrid()
     planner   = PathPlanner(grid)
     _nav_ref  = nav
+
+    recorder = DataRecorder() if args.record else None
 
     if has_goal:
         planner.set_goal(goal_x, goal_y)
@@ -300,6 +306,11 @@ def main():
             sensors.write_command(throttle=throttle, steering=steering,
                                  leds=leds)
 
+            # ── 11b. Record all sensor data ──────────────────────────────
+            if recorder:
+                recorder.record_tick(data, detection, nav_result, pose,
+                                     throttle, steering)
+
             # ── 12. Push data to dashboard ────────────────────────────────
             if dash:
                 dash.update_lidar(data['lidar_distances'],
@@ -372,6 +383,8 @@ def main():
         except Exception as e:
             print(f"  Warning: {e}")
 
+        if recorder:
+            recorder.close()
         if yolo:
             yolo.stop()
         if dash:
