@@ -226,7 +226,8 @@ class ObstacleDetector:
                 diff = abs(a - det_angle_rad)
                 if diff > np.pi:
                     diff = 2 * np.pi - diff
-                if diff <= hw and distances[i] <= cfg.ZONE_CLEAR_M:
+                # YOLO only affects path when object within 0.2m
+                if diff <= hw and distances[i] <= cfg.YOLO_AFFECT_DIST_M:
                     if lidar_dist is None or distances[i] < lidar_dist:
                         lidar_dist = float(distances[i])
 

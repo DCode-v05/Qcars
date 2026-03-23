@@ -169,3 +169,25 @@ PERSON_SLOW_S      = 1.0        # slow near person for 1s then resume
 # Dashboard
 DASHBOARD_PORT     = 5000
 JPEG_QUALITY       = 75
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OCCUPANCY GRID & A* PATH PLANNING
+# ═══════════════════════════════════════════════════════════════════════════════
+GRID_RESOLUTION_M   = 0.05    # 5cm per cell
+GRID_SIZE_M         = 10.0    # 10m x 10m map
+GRID_UPDATE_HZ      = 10      # update grid at 10Hz
+GRID_LOG_OCC        = 0.7     # log-odds for occupied cell
+GRID_LOG_FREE       = -0.3    # log-odds for free cell
+GRID_LOG_MAX        = 5.0     # clamp
+GRID_LOG_MIN        = -5.0    # clamp
+GRID_OCC_THRESH     = 0.55    # probability threshold for occupied
+
+ASTAR_REPLAN_HZ     = 2.0     # replan frequency
+ASTAR_MAX_NODES     = 30000   # search limit
+ASTAR_INFLATE_CELLS = 3       # inflate obstacles ~15cm
+WAYPOINT_LOOKAHEAD_M = 0.40   # pure-pursuit lookahead
+WAYPOINT_REACHED_M   = 0.15   # within this = advance waypoint
+GOAL_REACHED_M       = 0.20   # within this = goal reached
+
+# YOLO: only affect navigation when object within this distance
+YOLO_AFFECT_DIST_M  = 0.20    # 20cm — ignore far YOLO detections for path decisions
