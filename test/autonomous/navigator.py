@@ -87,22 +87,33 @@ class Navigator:
             self.state = 'REVERSING'
         else:
             # ── Autonomous decision ───────────────────────────────────────
-            # PRIORITY: Always prefer FORWARD + STEERING over reversing.
-            # The car should steer left/right around obstacles first.
-            # Only reverse when ALL forward paths are truly blocked.
+            # PRIORITY: Forward + steering first. Reverse only when the
+            # car physically cannot turn (obstacle closer than turn radius
+            # AND a significant turn is needed).
             #
             # Priority:
-            #   1. VFH found forward gap → DRIVING (steer around)
-            #   2. Front not critically close → DRIVING
-            #   3. All forward blocked, rear clear → REVERSING
-            #   4. Boxed in → DRIVING with hard steer
+            #   1. Forward gap with path nearly straight → DRIVING
+            #   2. Forward gap but too close for the turn → REVERSING to create space
+            #   3. Front not critically close → DRIVING
+            #   4. All forward blocked, rear clear → REVERSING
+            #   5. Boxed in → DRIVING with hard steer
 
-            if drive_fwd:
-                # VFH found a forward-reachable gap — always drive forward.
-                # Even if something is close on one side, VFH found a way around.
+            needs_big_turn = abs(path_steer) > np.radians(15)
+            too_close_for_turn = front_dist < cfg.MIN_TURN_RADIUS_M
+
+            if drive_fwd and not (too_close_for_turn and needs_big_turn):
+                # Forward gap AND either path is nearly straight OR enough
+                # room to execute the turn → steer around
                 self.state = 'DRIVING'
+            elif too_close_for_turn and needs_big_turn and rear_dist > cfg.REAR_CLEAR_M:
+                # Need a big turn but obstacle is too close to physically
+                # turn around it → reverse briefly to create turning space
+                self.state = 'REVERSING'
             elif front_dist > cfg.ZONE_WARN_M:
                 # Front isn't critical — keep driving forward
+                self.state = 'DRIVING'
+            elif drive_fwd:
+                # Forward gap exists but tight — try driving with steering
                 self.state = 'DRIVING'
             elif rear_dist > cfg.REAR_CLEAR_M:
                 # All forward paths blocked AND front is close — reverse
