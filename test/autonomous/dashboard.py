@@ -81,6 +81,7 @@ class Dashboard:
                 'state': str(nav_result['state']),
                 'throttle': float(nav_result['throttle']),
                 'steering': round(float(nav_result['steering']), 4),
+                'heading_rad': round(float(nav_result.get('heading_rad', 0.0)), 4),
             }
 
     def update_detections(self, dets):

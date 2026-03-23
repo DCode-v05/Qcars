@@ -19,7 +19,7 @@ CPS_TO_MPS        = (1.0 / ENCODER_CPR) * GEAR_RATIO * 2 * np.pi * WHEEL_RADIUS_
 MAX_STEERING_RAD   = np.radians(30)   # ±30° max steering lock
 MIN_TURN_RADIUS_M  = WHEEL_BASE_M / np.tan(MAX_STEERING_RAD)  # ~0.44m
 CAR_HALF_WIDTH_M   = CAR_WIDTH_M / 2.0 + 0.03  # +3cm safety margin
-OBSTACLE_INFLATE_M = CAR_HALF_WIDTH_M
+OBSTACLE_INFLATE_M = 0.06                       # reduced — DWA handles car width via trajectory sim
 
 # IMU calibration
 GYRO_BIAS_Z       = 0.024       # rad/s

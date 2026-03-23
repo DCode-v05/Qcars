@@ -465,22 +465,29 @@ function drawBirdEye() {
     ctx.fillText((r * LIDAR_MAX_M / 4).toFixed(1) + "m", R_CX + 3, R_CY - rr + 10);
   }
 
-  // ── Cardinal labels ──
-  const labels = ["FRONT", "RIGHT", "BACK", "LEFT"];
+  // ── Car heading (from IMU gyroscope integration) ──
+  const heading = _navData.heading_rad || 0;  // radians, positive = turned left
+
+  // ── Cardinal labels (rotate with heading — world-fixed) ──
+  const cardinals = [
+    { label: "N", angle: -Math.PI/2 - heading },
+    { label: "E", angle: 0 - heading },
+    { label: "S", angle: Math.PI/2 - heading },
+    { label: "W", angle: Math.PI - heading },
+  ];
   ctx.font = "9px 'Share Tech Mono'";
   ctx.fillStyle = "#3a7a3a";
   ctx.textAlign = "center";
-  ctx.fillText(labels[0], R_CX, R_CY - R_RMAX - 2);
-  ctx.fillText(labels[2], R_CX, R_CY + R_RMAX + 10);
-  ctx.textAlign = "left";
-  ctx.fillText(labels[1], R_CX + R_RMAX + 3, R_CY + 4);
-  ctx.textAlign = "right";
-  ctx.fillText(labels[3], R_CX - R_RMAX - 3, R_CY + 4);
+  for (const c of cardinals) {
+    const lx = R_CX + Math.cos(c.angle) * (R_RMAX + 8);
+    const ly = R_CY + Math.sin(c.angle) * (R_RMAX + 8) + 4;
+    ctx.fillText(c.label, lx, ly);
+  }
   ctx.textAlign = "left";
 
-  // ── Cardinal spokes ──
+  // ── Cardinal spokes (rotate with heading) ──
   for (let i = 0; i < 4; i++) {
-    const a = (i * 90 - 90) * Math.PI / 180;
+    const a = (i * 90) * Math.PI / 180 - Math.PI / 2 - heading;
     ctx.beginPath();
     ctx.moveTo(R_CX, R_CY);
     ctx.lineTo(R_CX + Math.cos(a) * R_RMAX, R_CY + Math.sin(a) * R_RMAX);
@@ -488,6 +495,13 @@ function drawBirdEye() {
     ctx.lineWidth = 1;
     ctx.stroke();
   }
+
+  // ── Car direction indicator (always points up = car's front) ──
+  ctx.font = "bold 9px 'Share Tech Mono'";
+  ctx.fillStyle = "#00ff88";
+  ctx.textAlign = "center";
+  ctx.fillText("▲ FRONT", R_CX, R_CY - R_RMAX - 2);
+  ctx.textAlign = "left";
 
   // ── Zone rings (STOP=red, WARN=amber, CLEAR=dim) ──
   const stopR  = (0.4 / LIDAR_MAX_M) * R_RMAX;
@@ -503,13 +517,19 @@ function drawBirdEye() {
   ctx.lineWidth = 1;
   ctx.stroke();
 
+  // ── Rotate canvas so world stays fixed, car rotates ──
+  // LiDAR/YOLO/path are in car-frame; rotate by -heading to show world-fixed view
+  ctx.save();
+  ctx.translate(R_CX, R_CY);
+  ctx.rotate(-heading);
+  ctx.translate(-R_CX, -R_CY);
+
   // ── LiDAR point cloud (obstacles) ──
   for (const pt of _lidarPts) {
     const r = Math.min(pt.d / LIDAR_MAX_M, 1.0) * R_RMAX;
     const a = pt.a - Math.PI / 2;  // rotate so 0=up
     const x = R_CX + Math.cos(a) * r;
     const y = R_CY + Math.sin(a) * r;
-    // Color by distance: red=close, yellow=mid, green=far
     let col;
     if (pt.d < 0.4) col = "#ff3344";
     else if (pt.d < 1.5) col = "#ffaa00";
@@ -548,23 +568,20 @@ function drawBirdEye() {
     ctx.textAlign = "left";
   }
 
-  // ── Best path arrow (thick green/yellow line) ──
+  // ── Best path arrow ──
   if (_navData.has_path) {
     const pa = _navData.best_path_angle - Math.PI / 2;
     const pathR = R_RMAX * 0.7;
     const ex = R_CX + Math.cos(pa) * pathR;
     const ey = R_CY + Math.sin(pa) * pathR;
     const pathCol = _navData.drive_forward ? "#00ff88" : "#ff6644";
-    // Arrow shaft
     ctx.beginPath();
     ctx.moveTo(R_CX, R_CY);
     ctx.lineTo(ex, ey);
     ctx.strokeStyle = pathCol;
     ctx.lineWidth = 3;
     ctx.stroke();
-    // Arrowhead
-    const headLen = 12;
-    const headAng = 0.4;
+    const headLen = 12, headAng = 0.4;
     ctx.beginPath();
     ctx.moveTo(ex, ey);
     ctx.lineTo(ex - headLen * Math.cos(pa - headAng),
@@ -575,7 +592,6 @@ function drawBirdEye() {
     ctx.strokeStyle = pathCol;
     ctx.lineWidth = 2.5;
     ctx.stroke();
-    // Label
     const dir = _navData.drive_forward ? "FWD" : "REV";
     ctx.font = "bold 9px 'Share Tech Mono'";
     ctx.fillStyle = pathCol;
@@ -584,7 +600,7 @@ function drawBirdEye() {
     ctx.textAlign = "left";
   }
 
-  // ── QCar body ──
+  // ── QCar body (rotates with car) ──
   ctx.beginPath();
   ctx.arc(R_CX, R_CY, 8, 0, Math.PI * 2);
   ctx.fillStyle = "#00ff88";
@@ -597,14 +613,17 @@ function drawBirdEye() {
   ctx.fillStyle = "#00ff88";
   ctx.fill();
 
+  ctx.restore();  // undo heading rotation
+
   // ── Status bar at bottom ──
   if (_navData.state) {
     const zoneCols = {CLEAR:"#00cc66", WARN:"#ffaa00", STOP:"#ff3344"};
+    const hdg = ((heading * 180 / Math.PI) % 360 + 360) % 360;
     ctx.font = "bold 10px 'Share Tech Mono'";
     ctx.fillStyle = zoneCols[_navData.zone] || "#888";
     ctx.textAlign = "center";
     ctx.fillText(
-      `${_navData.state}  ${_navData.zone}  ${_navData.distance_m}m`,
+      `${_navData.state}  ${_navData.zone}  ${_navData.distance_m}m  HDG ${hdg.toFixed(0)}°`,
       R_CX, R_SIZE - 4
     );
     ctx.textAlign = "left";

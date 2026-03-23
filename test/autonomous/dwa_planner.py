@@ -35,34 +35,31 @@ class DWAPlanner:
         candidates = self._generate_candidates()
         best = None
         best_score = -float('inf')
-        # Track best-of-colliding as fallback
-        fallback = None
-        fallback_clearance = -float('inf')
 
         for steer_rad, forward in candidates:
             traj = self._simulate(steer_rad, forward)
             clear, min_clearance = self._check_collision(traj, histogram)
 
-            if clear:
-                score = self._score(traj, steer_rad, forward,
-                                    min_clearance, current_steering,
-                                    goal_heading, histogram)
-                if score > best_score:
-                    best_score = score
-                    best = (steer_rad, forward, traj, min_clearance)
-            else:
-                # Track the least-bad colliding trajectory
-                if min_clearance > fallback_clearance:
-                    fallback_clearance = min_clearance
-                    fallback = (steer_rad, forward, traj, min_clearance)
+            # Score ALL trajectories — collision adds a penalty, not a hard reject.
+            # This lets the DWA pick "slightly risky forward" over "reverse into wall"
+            # in tight spaces where histogram inflation blocks everything.
+            score = self._score(traj, steer_rad, forward,
+                                min_clearance, current_steering,
+                                goal_heading, histogram)
 
-        # If nothing is collision-free, use the least-bad trajectory
+            # Collision penalty: proportional to how deep into the margin
+            if not clear:
+                # severity = how far below the safety margin
+                # 0.0 = just at margin, higher = deeper collision
+                severity = max(0.0, cfg.DWA_COLLISION_MARGIN - min_clearance)
+                score -= 0.2 + severity * 5.0
+
+            if score > best_score:
+                best_score = score
+                best = (steer_rad, forward, traj, min_clearance)
+
         if best is None:
-            if fallback is not None:
-                best = fallback
-            else:
-                # Absolute fallback: drive straight forward slowly
-                best = (0.0, True, [(0, 0, 0)], 0.0)
+            best = (0.0, True, [(0, 0, 0)], 0.0)
 
         steer_rad, forward, traj, clearance = best
 
@@ -142,11 +139,13 @@ class DWAPlanner:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _check_collision(self, trajectory, histogram):
-        """Check if a trajectory is collision-free against the polar histogram.
+        """Check trajectory against the polar histogram.
+        Scans the ENTIRE trajectory to find true worst-case clearance.
         Returns (collision_free, min_clearance)."""
         n_bins = len(histogram)
         min_clearance = float('inf')
         margin = cfg.DWA_COLLISION_MARGIN
+        collides = False
 
         for (x, y, _) in trajectory:
             dist_from_car = math.sqrt(x * x + y * y)
@@ -157,7 +156,7 @@ class DWAPlanner:
             angle = math.atan2(y, x) % (2 * math.pi)
             bin_idx = int(angle / (2 * math.pi) * n_bins) % n_bins
 
-            # Check this bin and immediate neighbours for safety
+            # Check this bin and immediate neighbours
             for offset in range(-1, 2):
                 b = (bin_idx + offset) % n_bins
                 obstacle_dist = histogram[b]
@@ -165,9 +164,9 @@ class DWAPlanner:
                 if clearance < min_clearance:
                     min_clearance = clearance
                 if clearance < margin:
-                    return False, min_clearance
+                    collides = True
 
-        return True, min_clearance
+        return (not collides), min_clearance
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TRAJECTORY SCORING
@@ -205,7 +204,24 @@ class DWAPlanner:
                  cfg.DWA_W_SMOOTH    * smooth_score +
                  cfg.DWA_W_FORWARD   * direction_bonus)
 
-        # 6. Reverse turn bonus: when reversing, prefer turning toward
+        # 6. Steer-away bonus: when obstacle is close ahead, reward steering
+        #    more than going straight (turning away from a wall is better)
+        if forward and histogram is not None and min_clearance < 0.5:
+            n = len(histogram)
+            front_dist = float(histogram[0])
+            if front_dist < 1.0:
+                # Front is close — reward ANY steering
+                steer_magnitude = abs(steering) / cfg.MAX_STEERING_RAD
+                score += 0.15 * steer_magnitude
+                # Extra bonus for steering toward the open side
+                left_front = float(np.mean(histogram[n - 6:]))       # bins 66-71 = left-front
+                right_front = float(np.mean(histogram[1:7]))          # bins 1-6 = right-front
+                if steering > 0.05 and left_front > right_front:
+                    score += 0.10
+                elif steering < -0.05 and right_front > left_front:
+                    score += 0.10
+
+        # 7. Reverse turn bonus: when reversing, prefer turning toward
         #    the side with more space (prepares for next forward move)
         if not forward and histogram is not None:
             # Check which side has more space in the front hemisphere

@@ -188,9 +188,11 @@ def main():
             yolo_dets = yolo.get_detections() if yolo else []
             detection = detector.detect(data, yolo_dets)
 
-            # ── 6. Navigate (with IMU for crash detection) ────────────────
+            # ── 6. Navigate (with IMU for crash + heading) ────────────────
             imu_accel = data.get('accelerometer')
-            nav_result = nav.update(detection, dt, imu_accel=imu_accel)
+            imu_gyro  = data.get('gyroscope')
+            nav_result = nav.update(detection, dt,
+                                    imu_accel=imu_accel, imu_gyro=imu_gyro)
             throttle   = nav_result['throttle']
             steering   = nav_result['steering']
             state      = nav_result['state']

@@ -39,6 +39,8 @@ class Navigator:
         self._stuck_counter  = 0
         self._recovery_start = 0.0
         self._recovery_steer = 0.0
+        # Heading tracking (integrated from gyroscope yaw)
+        self._heading_rad    = 0.0   # accumulated yaw, 0 = initial heading
 
     def reset(self):
         self.state = 'DRIVING'
@@ -46,14 +48,15 @@ class Navigator:
         self._manual_mode = None
         self._crash_reversing = False
         self._stuck_counter = 0
+        self._heading_rad = 0.0
 
     def set_manual(self, mode):
         """Called from key listener: 'd'=forward, 'r'=reverse, None=auto."""
         self._manual_mode = mode
 
-    def update(self, detection, dt, imu_accel=None):
+    def update(self, detection, dt, imu_accel=None, imu_gyro=None):
         """
-        Returns dict with throttle, steering, state, leds.
+        Returns dict with throttle, steering, state, leds, heading_rad.
         """
         path_steer = detection['path_steer']
         drive_fwd  = detection['drive_forward']
@@ -62,6 +65,11 @@ class Navigator:
         left_dist  = detection.get('left_min_m', 9.0)
         right_dist = detection.get('right_min_m', 9.0)
         now        = time.perf_counter()
+
+        # ── Heading integration from gyroscope ────────────────────────────
+        if imu_gyro is not None and dt > 0:
+            yaw_rate = float(imu_gyro[2]) - cfg.GYRO_BIAS_Z  # z-axis = yaw
+            self._heading_rad += yaw_rate * dt
 
         # ── IMU crash detection ───────────────────────────────────────────
         crash_detected = False
@@ -163,6 +171,7 @@ class Navigator:
             'state':          self.state,
             'leds':           leds,
             'crash_detected': crash_detected,
+            'heading_rad':    self._heading_rad,
         }
 
     def _smooth_steer(self, target, dt):
