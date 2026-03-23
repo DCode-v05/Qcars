@@ -16,8 +16,8 @@ TACH_TO_MPS       = GEAR_RATIO * WHEEL_RADIUS_M
 CPS_TO_MPS        = (1.0 / ENCODER_CPR) * GEAR_RATIO * 2 * np.pi * WHEEL_RADIUS_M
 
 # Turning geometry (Ackermann)
-MAX_STEERING_RAD   = np.radians(30)   # ±30° max steering lock
-MIN_TURN_RADIUS_M  = WHEEL_BASE_M / np.tan(MAX_STEERING_RAD)  # ~0.44m
+MAX_STEERING_RAD   = np.radians(40)   # ±40° max steering lock (pushed to hardware limit)
+MIN_TURN_RADIUS_M  = WHEEL_BASE_M / np.tan(MAX_STEERING_RAD)  # ~0.31m
 CAR_HALF_WIDTH_M   = CAR_WIDTH_M / 2.0 + 0.03  # +3cm safety margin
 OBSTACLE_INFLATE_M = 0.06                       # reduced — DWA handles car width via trajectory sim
 
@@ -54,8 +54,8 @@ RS_FPS             = 30
 
 # LiDAR (RPLIDAR A2)
 LIDAR_NUM_MEAS     = 384
-LIDAR_RANGE_MODE   = 2
-LIDAR_FRONT_DEG    = 180.0      # LiDAR 180° = car's actual front (calibrated)
+LIDAR_RANGE_MODE   = 1
+LIDAR_FRONT_DEG    = 0.0      # LiDAR 180° = car's actual front (calibrated)
 LIDAR_INTERP       = 0
 LIDAR_MIN_M        = 0.10
 LIDAR_MAX_M        = 6.0
@@ -124,9 +124,13 @@ DWA_W_SMOOTH        = 0.05       # reward smooth steering (low so side-steer bea
 DWA_W_FORWARD       = 0.40       # strong forward bias — side gap always beats reverse
 
 # Stuck detection & recovery
-STUCK_THRESHOLD      = 60         # ticks at near-max-lock → stuck (~2s at 30Hz)
+STUCK_THRESHOLD      = 45         # ticks at near-max-lock → stuck (~1.5s at 30Hz)
 STUCK_STEER_FRAC     = 0.85      # fraction of max steering considered "locked"
-RECOVERY_DURATION_S  = 1.5       # reverse for 1.5s during recovery
+RECOVERY_DURATION_S  = 2.5       # reverse for 2.5s during recovery (longer = more space to turn)
+
+# Direction commitment: once a direction is chosen, hold it for minimum ticks
+# Prevents rapid FWD↔REV oscillation
+DIR_COMMIT_TICKS     = 15         # hold direction for ~0.5s before allowing change
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  OBSTACLE ZONES
