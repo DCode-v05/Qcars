@@ -51,6 +51,8 @@ class Dashboard:
         self._det_data = []
         self._rs_rgb = None         # RealSense RGB frame
         self._rs_depth_vis = None   # RealSense depth colorized
+        self._map_data = None       # occupancy grid points
+        self._path_data = None      # A* path + pose + goal
         self._data_lock = threading.Lock()
         self._setup_routes()
         self._thread = None
@@ -105,6 +107,17 @@ class Dashboard:
                     self._rs_depth_vis = None
             else:
                 self._rs_depth_vis = None
+
+    def update_map(self, map_points, path_points, pose, goal):
+        """Called from main loop to push map + path data."""
+        with self._data_lock:
+            self._map_data = map_points
+            self._path_data = {
+                'path': path_points or [],
+                'pose': {'x': round(pose[0], 3), 'y': round(pose[1], 3),
+                         'theta': round(pose[2], 4)},
+                'goal': {'x': round(goal[0], 2), 'y': round(goal[1], 2)} if goal else None,
+            }
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -197,6 +210,13 @@ class Dashboard:
                 return "encode error", 500
             return Response(data, mimetype="image/jpeg",
                             headers={"Cache-Control": "no-store"})
+
+        @app.route("/map")
+        def map_data():
+            with self._data_lock:
+                mp = self._map_data or []
+                pp = self._path_data or {}
+            return jsonify(obstacles=mp, navigation=pp, ts=time.time())
 
         @app.route("/healthz")
         def health():
