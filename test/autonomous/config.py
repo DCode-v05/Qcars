@@ -2,7 +2,7 @@
 config.py — All constants for QCar 2 autonomous obstacle avoidance.
 """
 import numpy as np
-
+ 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  VEHICLE HARDWARE & GEOMETRY
 # ═══════════════════════════════════════════════════════════════════════════════
