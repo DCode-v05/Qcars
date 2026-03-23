@@ -94,19 +94,39 @@ MOVING_IDS  = {1, 2, 3, 16}
 STATIC_IDS  = {24, 25, 26, 28, 56, 57, 58, 59, 60, 62, 63, 64, 72, 73}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  VFH PATH PLANNER — distance-aware, always finds a path
+#  VFH HISTOGRAM (kept for obstacle mapping — DWA uses this as its obstacle map)
 # ═══════════════════════════════════════════════════════════════════════════════
 VFH_NUM_BINS       = 72         # 5° per bin
 VFH_BIN_WIDTH_DEG  = 360.0 / VFH_NUM_BINS
 VFH_BIN_WIDTH_RAD  = np.radians(VFH_BIN_WIDTH_DEG)
-VFH_GAP_THRESH_M   = 0.30      # lowered: 30cm = open (was 0.5)
+VFH_GAP_THRESH_M   = 0.30
 VFH_PLAN_RANGE_M   = 4.0
-VFH_MIN_GAP_BINS   = 4         # 20° minimum gap (was 30°)
+VFH_MIN_GAP_BINS   = 4
 VFH_GOAL_BIAS      = 2.0
 VFH_TURN_PENALTY   = 0.2
+VFH_DIST_DECAY     = 2.0
 
-# Distance-based obstacle weight: far obstacles matter less
-VFH_DIST_DECAY     = 2.0       # obstacles at 2m have half the weight of 0.5m
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DWA PATH PLANNER — samples Ackermann trajectories, checks against histogram
+# ═══════════════════════════════════════════════════════════════════════════════
+DWA_SPEED_MPS       = 0.4        # estimated car speed at THROTTLE=0.10
+DWA_SIM_TIME_S      = 0.6        # simulate 0.6s into the future
+DWA_SIM_STEPS       = 6          # 6 steps = 0.1s per step
+DWA_NUM_STEER_FWD   = 21         # forward samples: -30° to +30° in 3° steps
+DWA_NUM_STEER_REV   = 7          # reverse samples: -30° to +30° in 10° steps
+DWA_COLLISION_MARGIN = 0.05              # radial safety buffer (histogram already inflates angularly)
+
+# Scoring weights
+DWA_W_PROGRESS      = 0.25       # reward forward distance travelled
+DWA_W_GOAL          = 0.20       # reward alignment with goal heading
+DWA_W_CLEARANCE     = 0.20       # reward distance from obstacles
+DWA_W_SMOOTH        = 0.10       # reward smooth steering transitions
+DWA_W_FORWARD       = 0.25       # reward forward over reverse
+
+# Stuck detection & recovery
+STUCK_THRESHOLD      = 60         # ticks at near-max-lock → stuck (~2s at 30Hz)
+STUCK_STEER_FRAC     = 0.85      # fraction of max steering considered "locked"
+RECOVERY_DURATION_S  = 1.5       # reverse for 1.5s during recovery
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  OBSTACLE ZONES

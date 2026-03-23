@@ -227,6 +227,8 @@ def main():
                 mode = ""
                 if state.startswith("MANUAL"):
                     mode = " [MANUAL]"
+                elif state == "RECOVERING":
+                    mode = " [STUCK-RECOVERY]"
 
                 print(
                     f"[{elapsed:5.1f}s] {state:<11}{mode} "
