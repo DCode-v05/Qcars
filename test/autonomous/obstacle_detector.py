@@ -136,14 +136,14 @@ class ObstacleDetector:
             a = angles[i] % (2 * np.pi)
             centre_bin = int(a / (2 * np.pi) * n_bins) % n_bins
 
-            # Inflate by car width at this distance
+            # Inflate minimally — DWA trajectory sim handles car width
             if d > 0.05:
                 inflate_rad = math.atan(cfg.OBSTACLE_INFLATE_M / d)
                 inflate_bins = max(1, int(math.ceil(
                     inflate_rad / cfg.VFH_BIN_WIDTH_RAD)))
-                inflate_bins = min(inflate_bins, 5)
+                inflate_bins = min(inflate_bins, 2)
             else:
-                inflate_bins = 3
+                inflate_bins = 1
 
             for offset in range(-inflate_bins, inflate_bins + 1):
                 b = (centre_bin + offset) % n_bins
