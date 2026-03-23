@@ -369,9 +369,23 @@ class ObstacleDetector:
 
     def _fallback_direction(self):
         """When no passable gap exists, pick the direction with most space.
-        The car should ALWAYS have somewhere to go."""
+        Strongly prefer forward-facing bins — only pick rear as last resort."""
         n = cfg.VFH_NUM_BINS
-        best_bin = int(np.argmax(self._histogram))
+
+        # Score each bin: distance + forward bias
+        best_bin = 0
+        best_score = -1.0
+        for b in range(n):
+            d = float(self._histogram[b])
+            angle_b = b * (2 * np.pi / n)
+            norm_a = angle_b if angle_b <= np.pi else angle_b - 2 * np.pi
+            # Forward bias: bins near 0 get a bonus
+            fwd_bias = 1.0 - abs(norm_a) / np.pi  # 1.0 at front, 0.0 at rear
+            score = d + fwd_bias * 0.5  # 0.5m equivalent bonus for forward
+            if score > best_score:
+                best_score = score
+                best_bin = b
+
         best_dist = float(self._histogram[best_bin])
         angle = best_bin * (2 * np.pi / n)
 
@@ -416,10 +430,17 @@ class ObstacleDetector:
             gap_norm = gap['angle']
             if gap_norm > np.pi:
                 gap_norm -= 2 * np.pi
-            is_forward = abs(gap_norm) <= np.radians(120)
+            abs_angle = abs(gap_norm)
 
-            # Forward bonus: strongly prefer ANY forward-reachable gap
-            fwd_bonus = 0.5 if is_forward else 0.0
+            # Tiered forward bonus: strongly prefer straight, then side, penalize rear
+            if abs_angle <= np.radians(30):
+                fwd_bonus = 1.0    # straight ahead — best
+            elif abs_angle <= np.radians(90):
+                fwd_bonus = 0.7    # side gap — good
+            elif abs_angle <= np.radians(120):
+                fwd_bonus = 0.4    # wide side — acceptable
+            else:
+                fwd_bonus = 0.0    # behind — last resort
 
             # Turn severity: prefer gaps closer to straight ahead
             turn_severity = abs(gap_norm) / np.pi

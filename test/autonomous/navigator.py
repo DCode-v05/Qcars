@@ -87,34 +87,28 @@ class Navigator:
             self.state = 'REVERSING'
         else:
             # ── Autonomous decision ───────────────────────────────────────
-            # PHYSICS: car turning radius = 0.44m. If obstacle is closer
-            # than that, turning alone CANNOT clear it — must reverse.
+            # PRIORITY: Always prefer FORWARD + STEERING over reversing.
+            # The car should steer left/right around obstacles first.
+            # Only reverse when ALL forward paths are truly blocked.
             #
             # Priority:
-            #   1. Too close to turn? → MUST reverse (physics constraint)
-            #   2. VFH found forward gap with clearance → DRIVING
-            #   3. Front not critically close → DRIVING
-            #   4. All forward blocked → REVERSING
+            #   1. VFH found forward gap → DRIVING (steer around)
+            #   2. Front not critically close → DRIVING
+            #   3. All forward blocked, rear clear → REVERSING
+            #   4. Boxed in → DRIVING with hard steer
 
-            too_close_to_turn = front_dist < cfg.MIN_TURN_RADIUS_M
-
-            if too_close_to_turn and rear_dist > cfg.REAR_CLEAR_M:
-                # Physics: can't turn at this distance, must back up
-                self.state = 'REVERSING'
-            elif too_close_to_turn:
-                # Too close AND rear blocked — try turning hard anyway
-                self.state = 'DRIVING'
-            elif drive_fwd:
-                # VFH found a forward gap — go
+            if drive_fwd:
+                # VFH found a forward-reachable gap — always drive forward.
+                # Even if something is close on one side, VFH found a way around.
                 self.state = 'DRIVING'
             elif front_dist > cfg.ZONE_WARN_M:
-                # Front isn't critical — keep driving
+                # Front isn't critical — keep driving forward
                 self.state = 'DRIVING'
             elif rear_dist > cfg.REAR_CLEAR_M:
-                # No forward gap and front is close — reverse
+                # All forward paths blocked AND front is close — reverse
                 self.state = 'REVERSING'
             else:
-                # Boxed in — creep forward with max steer
+                # Boxed in — creep forward with hard steer
                 self.state = 'DRIVING'
 
         # ── Compute throttle + steering ───────────────────────────────────
