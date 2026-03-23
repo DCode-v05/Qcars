@@ -2,7 +2,7 @@
 config.py — All constants for QCar 2 autonomous obstacle avoidance.
 """
 import numpy as np
-
+ 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  VEHICLE HARDWARE & GEOMETRY
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -16,8 +16,8 @@ TACH_TO_MPS       = GEAR_RATIO * WHEEL_RADIUS_M
 CPS_TO_MPS        = (1.0 / ENCODER_CPR) * GEAR_RATIO * 2 * np.pi * WHEEL_RADIUS_M
 
 # Turning geometry (Ackermann)
-MAX_STEERING_RAD   = np.radians(30)   # ±30° max steering lock
-MIN_TURN_RADIUS_M  = WHEEL_BASE_M / np.tan(MAX_STEERING_RAD)  # ~0.44m
+MAX_STEERING_RAD   = np.radians(40)   # ±40° max steering lock (pushed to hardware limit)
+MIN_TURN_RADIUS_M  = WHEEL_BASE_M / np.tan(MAX_STEERING_RAD)  # ~0.31m
 CAR_HALF_WIDTH_M   = CAR_WIDTH_M / 2.0 + 0.03  # +3cm safety margin
 OBSTACLE_INFLATE_M = 0.06                       # reduced — DWA handles car width via trajectory sim
 
@@ -54,8 +54,8 @@ RS_FPS             = 30
 
 # LiDAR (RPLIDAR A2)
 LIDAR_NUM_MEAS     = 384
-LIDAR_RANGE_MODE   = 2
-LIDAR_FRONT_DEG    = 180.0      # LiDAR 180° = car's actual front (calibrated)
+LIDAR_RANGE_MODE   = 1
+LIDAR_FRONT_DEG    = 0.0      # LiDAR 180° = car's actual front (calibrated)
 LIDAR_INTERP       = 0
 LIDAR_MIN_M        = 0.10
 LIDAR_MAX_M        = 6.0
@@ -110,23 +110,27 @@ VFH_DIST_DECAY     = 2.0
 #  DWA PATH PLANNER — samples Ackermann trajectories, checks against histogram
 # ═══════════════════════════════════════════════════════════════════════════════
 DWA_SPEED_MPS       = 0.4        # estimated car speed at THROTTLE=0.10
-DWA_SIM_TIME_S      = 0.6        # simulate 0.6s into the future
-DWA_SIM_STEPS       = 6          # 6 steps = 0.1s per step
+DWA_SIM_TIME_S      = 1.5        # simulate 1.5s — enough to turn 75° at max steer
+DWA_SIM_STEPS       = 8          # 8 steps
 DWA_NUM_STEER_FWD   = 21         # forward samples: -30° to +30° in 3° steps
 DWA_NUM_STEER_REV   = 7          # reverse samples: -30° to +30° in 10° steps
 DWA_COLLISION_MARGIN = 0.05              # radial safety buffer (histogram already inflates angularly)
 
-# Scoring weights
-DWA_W_PROGRESS      = 0.25       # reward forward distance travelled
-DWA_W_GOAL          = 0.20       # reward alignment with goal heading
+# Scoring weights — forward/side STRONGLY preferred over reverse
+DWA_W_PROGRESS      = 0.20       # reward forward distance travelled
+DWA_W_GOAL          = 0.15       # reward alignment with goal heading
 DWA_W_CLEARANCE     = 0.20       # reward distance from obstacles
-DWA_W_SMOOTH        = 0.10       # reward smooth steering transitions
-DWA_W_FORWARD       = 0.25       # reward forward over reverse
+DWA_W_SMOOTH        = 0.05       # reward smooth steering (low so side-steer beats straight)
+DWA_W_FORWARD       = 0.40       # strong forward bias — side gap always beats reverse
 
 # Stuck detection & recovery
-STUCK_THRESHOLD      = 60         # ticks at near-max-lock → stuck (~2s at 30Hz)
+STUCK_THRESHOLD      = 45         # ticks at near-max-lock → stuck (~1.5s at 30Hz)
 STUCK_STEER_FRAC     = 0.85      # fraction of max steering considered "locked"
-RECOVERY_DURATION_S  = 1.5       # reverse for 1.5s during recovery
+RECOVERY_DURATION_S  = 2.5       # reverse for 2.5s during recovery (longer = more space to turn)
+
+# Direction commitment: once a direction is chosen, hold it for minimum ticks
+# Prevents rapid FWD↔REV oscillation
+DIR_COMMIT_TICKS     = 15         # hold direction for ~0.5s before allowing change
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  OBSTACLE ZONES
