@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+
+import numpy as np
+import cv2
+import time
+from flask import Flask, Response
+from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
+from quanser.multimedia.exceptions import MediaError
+
+# ══════════════════════════════════════════════════════════════
+# CONFIG
+# ══════════════════════════════════════════════════════════════
+FRAME_WIDTH  = 820
+FRAME_HEIGHT = 410
+FRAME_RATE   = 220.0
+SENSOR_ID    =0
+# ══════════════════════════════════════════════════════════════
+
+app        = Flask(__name__)
+image_data = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+
+# Use constructor-style init as shown in official docs
+capture = VideoCapture(
+    f"video://localhost:{SENSOR_ID}",
+    FRAME_RATE,
+    FRAME_WIDTH,
+    FRAME_HEIGHT,
+    ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+    ImageDataType.UINT8,
+    None,
+    0
+)
+
+def init_camera():
+    capture.start()
+    print(f"Camera {SENSOR_ID} started → {FRAME_WIDTH}x{FRAME_HEIGHT} @ {FRAME_RATE}fps")
+    print("Open in browser → http://10.159.13.62:5000")
+
+def generate_frames():
+    while True:
+        got = capture.read(image_data)
+        if got:
+            ret, buffer = cv2.imencode('.jpg', image_data, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ret:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' +
+                       buffer.tobytes() +
+                       b'\r\n')
+        else:
+            time.sleep(0.001)
+
+@app.route('/')
+def index():
+    return f'''
+    <html>
+    <head>
+        <title>QCar2 Live Stream</title>
+        <style>
+            body {{ background:#111; margin:0; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; }}
+            h2   {{ color:#00ff88; font-family:monospace; margin-bottom:16px; }}
+            img  {{ border:2px solid #00ff88; max-width:95vw; }}
+            p    {{ color:#888; font-family:monospace; font-size:12px; }}
+        </style>
+    </head>
+    <body>
+        <h2>QCar2 — CSI Live Stream | Sensor {SENSOR_ID}</h2>
+        <img src="/video_feed">
+        <p>{FRAME_WIDTH}x{FRAME_HEIGHT} @ {FRAME_RATE}fps</p>
+    </body>
+    </html>
+    '''
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(
+        generate_frames(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+if __name__ == '__main__':
+    try:
+        init_camera()
+        app.run(host='0.0.0.0', port=5000, threaded=True)
+    except MediaError as e:
+        print(f"MediaError: {e.get_error_message()}")
+    finally:
+        try:
+            capture.stop()
+        except:
+            pass
+        try:
+            capture.close()
+        except:
+            pass
+        print("Camera closed.")
