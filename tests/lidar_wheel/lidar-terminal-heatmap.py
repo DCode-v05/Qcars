@@ -1,0 +1,829 @@
+#!/usr/bin/env python3
+"""
+QCar 2 — LiDAR Terminal Heatmap + Steering + Auto-Reverse
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Renders a full 360° polar heatmap directly in the terminal
+using ANSI 24-bit colour + Unicode block characters.
+No pygame. No sockets. No browser.
+
+  Red/Orange  = object close   (<= 0.5 m)
+  Yellow      = moderate       (0.5–1.0 m)
+  Green/Cyan  = safe / far     (>  1.0 m)
+
+  Cyan arc    = best free gap  (steering target)
+  Arrow glyph = steering direction
+
+Requires a terminal that supports:
+  • 256-colour or 24-bit ANSI  (any modern terminal)
+  • Unicode block chars         (▀ ▄ █ ░ ─ │ etc.)
+
+Run:
+    python3 lidar_term_drive.py
+
+Keys (press then Enter):
+    d  → force DRIVE mode
+    r  → force REVERSE mode
+    q  → quit cleanly
+"""
+
+import sys, os, math, time, select, tty, termios
+import numpy as np
+
+# ── optional hardware ──────────────────────────────────────────
+try:
+    from pal.products.qcar import QCarLidar
+    from quanser.hardware import HIL, EncoderQuadratureMode
+    from quanser.hardware.exceptions import HILError
+    HARDWARE = True
+except ImportError:
+    HARDWARE = False
+
+# ══════════════════════════════════════════════════════════════
+#  CALIBRATION
+# ══════════════════════════════════════════════════════════════
+FRONT_CENTER_DEG = 180.0
+REAR_CENTER_DEG  = (FRONT_CENTER_DEG + 180.0) % 360.0
+
+# ══════════════════════════════════════════════════════════════
+#  SAFETY & MOTION
+# ══════════════════════════════════════════════════════════════
+UNSAFE_M         = 1.00
+MODERATE_M       = 2.0
+MAX_RANGE_M      = 6.0
+
+DRIVE_THROTTLE   =  0.1
+REVERSE_THROTTLE = -0.1
+MAX_STEER_RAD    =  1.39
+STEER_GAIN       =  0.3
+
+FORWARD_ARC_DEG  = 20.0
+BLOCKED_FRAC     = 0.80
+GAP_SEARCH_DEG   = 180.0
+
+# ══════════════════════════════════════════════════════════════
+#  HARDWARE CONFIG
+# ══════════════════════════════════════════════════════════════
+CARD_TYPE        = "qcar2"
+CARD_ID          = "0"
+THROTTLE_CH      = 11000
+STEERING_CH      = 1000
+ENCODER_CH       = 0
+MOTOR_CH         = np.array([THROTTLE_CH, STEERING_CH], dtype=np.uint32)
+ENC_CH           = np.array([ENCODER_CH],               dtype=np.uint32)
+NUM_MEASUREMENTS = 384
+RANGING_MODE     = 0
+INTERP_MODE      = 0
+LOOP_HZ          = 8
+LOOP_PERIOD      = 1.0 / LOOP_HZ
+
+# ══════════════════════════════════════════════════════════════
+#  TERMINAL CANVAS
+# ══════════════════════════════════════════════════════════════
+# Each terminal cell = 1 col wide, ~2 rows tall visually.
+# We use a pixel grid where 1 pixel = 1 terminal cell.
+# Upper-half block ▀  lets us pack 2 vertical pixels per cell
+# using fg (top pixel) and bg (bottom pixel).
+
+CANVAS_COLS = 74     # terminal columns for radar
+CANVAS_ROWS = 38     # terminal rows  for radar  (×2 = 76 pixel rows)
+PIX_COLS    = CANVAS_COLS
+PIX_ROWS    = CANVAS_ROWS * 2      # 76 pixel rows
+
+RADAR_CX    = PIX_COLS  // 2      # pixel centre
+RADAR_CY    = PIX_ROWS  // 2
+RADAR_R     = min(RADAR_CX, RADAR_CY) - 2   # pixel radius
+
+# Right panel starts at column CANVAS_COLS + 1
+PANEL_COL   = CANVAS_COLS + 2
+PANEL_WIDTH = 44
+
+# ══════════════════════════════════════════════════════════════
+#  ANSI HELPERS
+# ══════════════════════════════════════════════════════════════
+ESC = "\033"
+
+def fg(r, g, b):        return f"{ESC}[38;2;{r};{g};{b}m"
+def bg(r, g, b):        return f"{ESC}[48;2;{r};{g};{b}m"
+def reset():            return f"{ESC}[0m"
+def bold():             return f"{ESC}[1m"
+def dim_ansi():         return f"{ESC}[2m"
+def move(row, col):     return f"{ESC}[{row};{col}H"
+def clear_screen():     return f"{ESC}[2J"
+def hide_cursor():      return f"{ESC}[?25l"
+def show_cursor():      return f"{ESC}[?25h"
+def clear_line():       return f"{ESC}[2K"
+
+# Palette
+C_BG      = (  4,   8,  15)
+C_PANEL   = (  8,  15,  26)
+C_BORDER  = ( 15,  42,  74)
+C_ACCENT  = (  0, 212, 255)
+C_SAFE    = (  0, 220, 100)
+C_MOD     = (255, 180,   0)
+C_UNSAFE  = (220,  40,  40)
+C_DIM     = ( 30,  60,  90)
+C_WHITE   = (200, 230, 255)
+C_GREY    = ( 80, 110, 140)
+C_GRID    = ( 18,  38,  62)
+
+
+def dist_color(d):
+    """Distance → (r,g,b) heatmap. Near=red, far=green/cyan."""
+    t = max(0.0, min(1.0, d / MAX_RANGE_M))
+    if t < 0.25:
+        r, g, b = 220, int(t / 0.25 * 130), 20
+    elif t < 0.50:
+        r, g, b = 220, 130 + int((t - 0.25) / 0.25 * 100), 0
+    elif t < 0.75:
+        r, g, b = int(220 * (1 - (t - 0.50) / 0.25)), 220, 0
+    else:
+        r, g, b = 0, int(220 - (t - 0.75) / 0.25 * 80), int((t - 0.75) / 0.25 * 200)
+    return (r, g, b)
+
+
+# ══════════════════════════════════════════════════════════════
+#  PIXEL CANVAS  (RGB numpy array)
+# ══════════════════════════════════════════════════════════════
+def make_canvas():
+    c = np.zeros((PIX_ROWS, PIX_COLS, 3), dtype=np.uint8)
+    c[:, :] = C_BG
+    return c
+
+
+def set_pixel(canvas, px, py, color):
+    if 0 <= py < PIX_ROWS and 0 <= px < PIX_COLS:
+        canvas[py, px] = color
+
+
+def draw_circle_pixels(canvas, cx, cy, r, color, filled=False):
+    """Bresenham circle on pixel canvas."""
+    if filled:
+        for dy in range(-r, r + 1):
+            dx = int(math.sqrt(max(0, r * r - dy * dy)))
+            for x in range(cx - dx, cx + dx + 1):
+                set_pixel(canvas, x, cy + dy, color)
+    else:
+        x, y, d = r, 0, 1 - r
+        while x >= y:
+            for sx, sy in [(cx+x,cy+y),(cx-x,cy+y),(cx+x,cy-y),(cx-x,cy-y),
+                           (cx+y,cy+x),(cx-y,cy+x),(cx+y,cy-x),(cx-y,cy-x)]:
+                set_pixel(canvas, sx, sy, color)
+            y += 1
+            if d < 0:
+                d += 2 * y + 1
+            else:
+                x -= 1; d += 2 * (y - x) + 1
+
+
+def draw_line_pixels(canvas, x0, y0, x1, y1, color):
+    """Bresenham line on pixel canvas."""
+    dx, dy = abs(x1 - x0), abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    while True:
+        set_pixel(canvas, x0, y0, color)
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy: err -= dy; x0 += sx
+        if e2 <  dx: err += dx; y0 += sy
+
+
+def draw_dot(canvas, px, py, color, r=2):
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dx * dx + dy * dy <= r * r:
+                set_pixel(canvas, px + dx, py + dy, color)
+
+
+# ══════════════════════════════════════════════════════════════
+#  RENDER CANVAS → TERMINAL STRING
+# ══════════════════════════════════════════════════════════════
+def canvas_to_terminal(canvas):
+    """
+    Pack 2 pixel rows into 1 terminal row using ▀ (upper half block).
+    Top pixel = fg colour, bottom pixel = bg colour.
+    """
+    out = []
+    for row in range(0, PIX_ROWS - 1, 2):
+        out.append(move(row // 2 + 2, 1))   # +2 for header row
+        prev_top = prev_bot = None
+        for col in range(PIX_COLS):
+            top = tuple(canvas[row,     col])
+            bot = tuple(canvas[row + 1, col])
+            part = ""
+            if top != prev_top:
+                part += fg(*top)
+                prev_top = top
+            if bot != prev_bot:
+                part += bg(*bot)
+                prev_bot = bot
+            part += "▀"
+            out.append(part)
+        out.append(reset())
+    return "".join(out)
+
+
+# ══════════════════════════════════════════════════════════════
+#  POLAR DRAW HELPERS
+# ══════════════════════════════════════════════════════════════
+def polar_to_pixel(dist_m, angle_rad):
+    """LiDAR polar → pixel (px, py) on canvas."""
+    r_px  = min(dist_m / MAX_RANGE_M, 1.0) * RADAR_R
+    front = math.radians(FRONT_CENTER_DEG)
+    # 0° = top of screen (forward)
+    sa    = (angle_rad - front) - math.pi / 2
+    px    = RADAR_CX + int(r_px * math.cos(sa))
+    py    = RADAR_CY + int(r_px * math.sin(sa))
+    return px, py
+
+
+def draw_grid(canvas):
+    """Range rings + spokes on pixel canvas."""
+    # rings
+    for rm in [1.0, 2.0, 3.0, MAX_RANGE_M]:
+        rp = int(rm / MAX_RANGE_M * RADAR_R)
+        draw_circle_pixels(canvas, RADAR_CX, RADAR_CY, rp, C_GRID)
+
+    # outer ring brighter
+    draw_circle_pixels(canvas, RADAR_CX, RADAR_CY, RADAR_R, C_BORDER)
+
+    # spokes every 45°
+    front = math.radians(FRONT_CENTER_DEG)
+    for deg in range(0, 360, 45):
+        a  = math.radians(deg) + front - math.pi / 2
+        ex = RADAR_CX + int(RADAR_R * math.cos(a))
+        ey = RADAR_CY + int(RADAR_R * math.sin(a))
+        draw_line_pixels(canvas, RADAR_CX, RADAR_CY, ex, ey, C_GRID)
+
+
+def draw_radar_points(canvas, distances, angles_rad):
+    """Plot all 384 LiDAR points as coloured dots."""
+    for i in range(len(distances)):
+        d = float(distances[i])
+        if d < 0.05:
+            continue
+        col      = dist_color(d)
+        px, py   = polar_to_pixel(d, float(angles_rad[i]))
+        dot_r    = 2 if d < 1.0 else 1
+        draw_dot(canvas, px, py, col, dot_r)
+
+
+def draw_gap_arc(canvas, gap_center_rad, gap_width_deg):
+    """Cyan arc showing detected free gap."""
+    half  = math.radians(gap_width_deg / 2)
+    front = math.radians(FRONT_CENTER_DEG)
+    r     = int(RADAR_R * 0.82)
+    steps = 40
+    prev  = None
+    for i in range(steps + 1):
+        a   = (gap_center_rad - half) + i * (2 * half / steps)
+        sa  = a - front - math.pi / 2
+        px  = RADAR_CX + int(r * math.cos(sa))
+        py  = RADAR_CY + int(r * math.sin(sa))
+        draw_dot(canvas, px, py, C_ACCENT, 1)
+        if prev:
+            draw_line_pixels(canvas, prev[0], prev[1], px, py, C_ACCENT)
+        prev = (px, py)
+
+
+def draw_steering_arrow(canvas, steer_rad, mode):
+    """Arrow from centre showing steering direction."""
+    col   = C_SAFE if mode == "DRIVE" else C_MOD
+    front = math.radians(FRONT_CENTER_DEG)
+    sign  = 1 if mode == "DRIVE" else -1
+    angle = front - math.pi / 2 + steer_rad * 2.0
+    length = int(RADAR_R * 0.35)
+    ex = RADAR_CX + int(length * sign * math.cos(angle))
+    ey = RADAR_CY + int(length * sign * math.sin(angle))
+    draw_line_pixels(canvas, RADAR_CX, RADAR_CY, ex, ey, col)
+    # arrowhead
+    for da in (-0.45, 0.45):
+        hx = ex + int(8 * math.cos(angle + math.pi + da))
+        hy = ey + int(8 * math.sin(angle + math.pi + da))
+        draw_line_pixels(canvas, ex, ey, hx, hy, col)
+
+
+def draw_car_icon(canvas, mode):
+    col = C_SAFE if mode == "DRIVE" else C_MOD
+    draw_dot(canvas, RADAR_CX, RADAR_CY, col, 4)
+    draw_dot(canvas, RADAR_CX, RADAR_CY, C_BG, 2)
+
+
+def draw_compass_labels(canvas):
+    """Tiny pixel-font compass markers — just bright dots at edges."""
+    front = math.radians(FRONT_CENTER_DEG)
+    markers = [("F", 0, C_ACCENT), ("R", 90, C_GRID),
+               ("B", 180, C_GRID), ("L", 270, C_GRID)]
+    for _, deg, col in markers:
+        a  = math.radians(deg) + front - math.pi / 2
+        px = RADAR_CX + int((RADAR_R + 3) * math.cos(a))
+        py = RADAR_CY + int((RADAR_R + 3) * math.sin(a))
+        draw_dot(canvas, px, py, col, 2)
+
+
+# ══════════════════════════════════════════════════════════════
+#  RIGHT PANEL  (pure text, printed alongside canvas)
+# ══════════════════════════════════════════════════════════════
+def bar_str(frac, width=20, col_on=C_SAFE, col_off=C_BORDER):
+    frac   = max(0.0, min(1.0, frac))
+    filled = int(frac * width)
+    empty  = width - filled
+    return (fg(*col_on)  + "█" * filled +
+            fg(*col_off) + "░" * empty  + reset())
+
+
+def panel_lines(mode, safety_str, safety_col, steer_rad,
+                throttle, min_front, min_rear,
+                gap_width, scan_count, fps,
+                auto_switches, encoder_m):
+
+    def hdr(txt):
+        return (fg(*C_BORDER) + "─" * 2 + reset() +
+                " " + fg(*C_GREY) + txt + reset())
+
+    def val(label, value, col=C_WHITE):
+        pad = 14 - len(label)
+        return (fg(*C_GREY) + label + " " * pad +
+                fg(*col) + str(value) + reset())
+
+    mode_col = C_SAFE if mode == "DRIVE" else C_MOD
+    mode_sym = "▲ DRIVE  " if mode == "DRIVE" else "▼ REVERSE"
+
+    steer_deg = math.degrees(steer_rad)
+    steer_col = C_MOD if abs(steer_deg) > 15 else C_WHITE
+    steer_bar = bar_str(
+        (steer_rad + MAX_STEER_RAD) / (2 * MAX_STEER_RAD),
+        width=22,
+        col_on=steer_col,
+        col_off=C_BORDER,
+    )
+    thr_frac  = abs(throttle) / 0.20
+    thr_col   = C_SAFE if throttle > 0 else C_MOD if throttle < 0 else C_GREY
+    thr_bar   = bar_str(thr_frac, width=22, col_on=thr_col, col_off=C_BORDER)
+
+    def dist_col(v):
+        if v is None:               return C_GREY
+        if v <= UNSAFE_M:           return C_UNSAFE
+        if v <= MODERATE_M:         return C_MOD
+        return C_SAFE
+
+    fd_str = f"{min_front:.3f} m" if min_front is not None else "no data"
+    rd_str = f"{min_rear:.3f}  m" if min_rear  is not None else "no data"
+    gw_str = f"{gap_width:.1f} deg" if gap_width > 0 else "none"
+
+    lines = [
+        bold() + fg(*C_ACCENT) + "QCar 2  LIDAR  HEATMAP" + reset(),
+        fg(*C_GREY) + "Steering + Auto-Reverse" + reset(),
+        fg(*C_BORDER) + "─" * PANEL_WIDTH + reset(),
+
+        hdr("MODE"),
+        "  " + bold() + fg(*mode_col) + mode_sym + reset(),
+        "",
+
+        hdr("SAFETY"),
+        "  " + fg(*safety_col) + bold() + safety_str + reset(),
+        "",
+
+        hdr("STEERING"),
+        val("  angle", f"{steer_deg:+6.1f} deg  ({steer_rad:+.3f} rad)", steer_col),
+        "  " + steer_bar,
+        "",
+
+        hdr("THROTTLE"),
+        val("  value", f"{throttle:+.3f}", thr_col),
+        "  " + thr_bar,
+        "",
+
+        fg(*C_BORDER) + "─" * PANEL_WIDTH + reset(),
+
+        hdr("DISTANCES"),
+        val("  front arc", fd_str, dist_col(min_front)),
+        val("  rear  arc", rd_str, dist_col(min_rear)),
+        val("  best gap",  gw_str, C_ACCENT),
+        "",
+
+        fg(*C_BORDER) + "─" * PANEL_WIDTH + reset(),
+
+        hdr("STATS"),
+        val("  scan #",    str(scan_count)),
+        val("  fps",       f"{fps:.1f}"),
+        val("  switches",  str(auto_switches), C_MOD),
+        val("  odometry",  f"{encoder_m:+.3f} m"),
+        "",
+
+        fg(*C_BORDER) + "─" * PANEL_WIDTH + reset(),
+
+        hdr("COLOR SCALE  near → far"),
+        "  " + "".join(
+            fg(*dist_color(i * MAX_RANGE_M / 28)) + "█"
+            for i in range(28)
+        ) + reset(),
+        "  " + fg(*C_UNSAFE) + "▲UNSAFE" + reset() +
+              fg(*C_MOD)    + "  ▲MOD" + reset() +
+              fg(*C_SAFE)   + "    ▲SAFE" + reset(),
+        "",
+
+        fg(*C_BORDER) + "─" * PANEL_WIDTH + reset(),
+        fg(*C_GREY) + " d=DRIVE  r=REVERSE  q=QUIT" + reset(),
+        fg(*C_GREY) + f" {'HARDWARE' if HARDWARE else 'DEMO MODE'}" + reset(),
+    ]
+    return lines
+
+
+# ══════════════════════════════════════════════════════════════
+#  GEOMETRY / SAFETY LOGIC  (same as pygame version)
+# ══════════════════════════════════════════════════════════════
+def angle_diff(a, b):
+    return math.atan2(math.sin(a - b), math.cos(a - b))
+
+
+def arc_min_dist(distances, angles_rad, center_deg, half_deg):
+    cr   = math.radians(center_deg)
+    hr   = math.radians(half_deg)
+    mask = np.array([abs(angle_diff(float(a), cr)) <= hr for a in angles_rad])
+    valid = (distances > 0.05) & mask
+    return float(distances[valid].min()) if valid.sum() > 0 else None
+
+
+def arc_blocked(distances, angles_rad, center_deg, half_deg, thresh, frac):
+    cr   = math.radians(center_deg)
+    hr   = math.radians(half_deg)
+    mask = np.array([abs(angle_diff(float(a), cr)) <= hr for a in angles_rad])
+    valid = (distances > 0.05) & mask
+    if valid.sum() == 0:
+        return False
+    return (distances[valid] <= thresh).sum() / valid.sum() >= frac
+
+def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
+    cr   = math.radians(travel_center_deg)
+    hr   = math.radians(search_half_deg)
+    mask = np.array([abs(angle_diff(float(a), cr)) <= hr for a in angles_rad])
+    if mask.sum() == 0:
+        return None
+    arc_a = angles_rad[mask]
+    arc_d = distances[mask]
+    order = np.argsort(arc_a)
+    arc_a, arc_d = arc_a[order], arc_d[order]
+    free  = arc_d > MODERATE_M
+
+    best_w, best_c = 0.0, None
+    run_s = None
+    for i in range(len(free)):
+        if free[i] and run_s is None:
+            run_s = i
+        if (not free[i] or i == len(free) - 1) and run_s is not None:
+            run_e = i if not free[i] else i + 1
+            w     = float(arc_a[run_e - 1] - arc_a[run_s])
+            if w > best_w:
+                best_w = w
+                best_c = float((arc_a[run_s] + arc_a[run_e - 1]) / 2.0)
+            run_s = None
+    if best_c is None:
+        return None
+    return best_c, math.degrees(best_w), angle_diff(best_c, cr)
+
+
+# ══════════════════════════════════════════════════════════════
+#  DEMO DATA
+# ══════════════════════════════════════════════════════════════
+_demo_t = 0.0
+
+def demo_scan():
+    global _demo_t
+    angles = np.linspace(0, 2 * np.pi, NUM_MEASUREMENTS, endpoint=False)
+    base   = 3.5 + 1.5 * np.sin(2 * angles) + 0.8 * np.cos(3 * angles + 1)
+    front  = math.radians(FRONT_CENTER_DEG)
+    wall   = 0.45 + 0.35 * abs(math.sin(_demo_t * 0.35))
+    blob   = wall * np.exp(-10 * (angles - front) ** 2)
+    dists  = np.clip(base - blob, 0.12, MAX_RANGE_M)
+    dists += np.random.normal(0, 0.02, NUM_MEASUREMENTS)
+    _demo_t += LOOP_PERIOD
+    return dists, angles
+
+
+# ══════════════════════════════════════════════════════════════
+#  NON-BLOCKING KEYPRESS  (no Enter needed)
+# ══════════════════════════════════════════════════════════════
+def setup_terminal():
+    """Switch terminal to raw mode — returns old settings."""
+    fd   = sys.stdin.fileno()
+    old  = termios.tcgetattr(fd)
+    tty.setraw(fd)
+    return old
+
+
+def restore_terminal(old):
+    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+
+
+def read_key():
+    """Return key char if pressed, else None. Non-blocking."""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
+#  FULL FRAME RENDER
+# ══════════════════════════════════════════════════════════════
+def render_frame(canvas, mode, safety_str, safety_col, steer_rad,
+                 throttle, min_front, min_rear, gap_result,
+                 scan_count, fps, auto_switches, encoder_m,
+                 distances, angles_rad):
+
+    # ── draw on pixel canvas ──────────────────────────────────
+    canvas[:] = C_BG
+    draw_grid(canvas)
+    draw_radar_points(canvas, distances, angles_rad)
+    if gap_result:
+        draw_gap_arc(canvas, gap_result[0], gap_result[1])
+    draw_steering_arrow(canvas, steer_rad, mode)
+    draw_car_icon(canvas, mode)
+    draw_compass_labels(canvas)
+
+    # ── convert canvas → terminal escape string ───────────────
+    radar_str = canvas_to_terminal(canvas)
+
+    # ── build right panel lines ───────────────────────────────
+    gw = gap_result[1] if gap_result else 0.0
+    plines = panel_lines(
+        mode, safety_str, safety_col, steer_rad,
+        throttle, min_front, min_rear,
+        gw, scan_count, fps, auto_switches, encoder_m
+    )
+
+    # ── assemble full output buffer ───────────────────────────
+    buf = []
+    buf.append(hide_cursor())
+
+    # header bar row 1
+    buf.append(move(1, 1))
+    mode_col = C_SAFE if mode == "DRIVE" else C_MOD
+    hdr = (
+        bg(*C_PANEL) + fg(*C_ACCENT) + bold() +
+        "  QCar 2 · LiDAR 360° Heatmap + Steering" +
+        reset() + bg(*C_PANEL) + fg(*C_GREY) +
+        f"  FRONT={FRONT_CENTER_DEG:.0f}° "
+        f"REAR={REAR_CENTER_DEG:.0f}°  "
+        f"arc=±{FORWARD_ARC_DEG:.0f}°  "
+        f"max={MAX_RANGE_M:.0f}m  " +
+        fg(*mode_col) + bold() +
+        ("▲ DRIVE" if mode == "DRIVE" else "▼ REVERSE") +
+        reset() + " " * 10
+    )
+    buf.append(hdr)
+
+    # radar canvas (rows 2 .. CANVAS_ROWS+1)
+    buf.append(radar_str)
+
+    # range labels on radar (right side of rings)
+    ring_labels = [(1.0,"1m"),(2.0,"2m"),(3.0,"3m"),(MAX_RANGE_M,f"{MAX_RANGE_M:.0f}m")]
+    for rm, lbl in ring_labels:
+        rp  = int(rm / MAX_RANGE_M * RADAR_R)
+        # pixel col → terminal col (each pixel = 1 col)
+        tc  = RADAR_CX + rp + 1
+        # pixel row → terminal row  (2 pixels per terminal row)
+        tr  = RADAR_CY // 2 + 2
+        buf.append(move(tr, tc + 1))
+        buf.append(dim_ansi() + fg(*C_DIM) + lbl + reset())
+
+    # right panel lines
+    for i, line in enumerate(plines):
+        buf.append(move(i + 2, PANEL_COL))
+        buf.append(line)
+        # pad/clear rest of line
+        buf.append(fg(*C_BG) + " " * 4 + reset())
+
+    # bottom status bar
+    bot_row = CANVAS_ROWS + 3
+    buf.append(move(bot_row, 1))
+    buf.append(
+        bg(*C_PANEL) + fg(*C_GREY) +
+        f"  scan={scan_count}  fps={fps:.1f}  "
+        f"steer={math.degrees(steer_rad):+.1f}°  "
+        f"thr={throttle:+.3f}  "
+        f"front={'N/A' if min_front is None else f'{min_front:.2f}m'}  "
+        f"rear={'N/A' if min_rear is None else f'{min_rear:.2f}m'}" +
+        " " * 20 + reset()
+    )
+
+    sys.stdout.write("".join(buf))
+    sys.stdout.flush()
+
+
+# ══════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════
+def main():
+    # ── hardware init ─────────────────────────────────────────
+    card = None; lidar = None
+    motor_buf = np.array([0.0, 0.0], dtype=np.float64)
+    enc_buf   = np.zeros(1, dtype=np.int32)
+    encoder_m = 0.0
+    METRES_PER_COUNT = (2 * math.pi * 0.0328) / (720 * 4)
+
+    if HARDWARE:
+        print("Opening HIL board ...")
+        try:
+            card = HIL(CARD_TYPE, CARD_ID)
+            enc_mode = np.array([EncoderQuadratureMode.X4], dtype=np.int32)
+            card.set_encoder_quadrature_mode(ENC_CH, 1, enc_mode)
+            card.set_encoder_counts(ENC_CH, 1, np.zeros(1, dtype=np.int32))
+            card.write_other(MOTOR_CH, 2, motor_buf)
+        except HILError as e:
+            print(f"HIL failed: {e.get_error_message()}")
+            card = None
+
+        print("Starting LiDAR (2s spin-up) ...")
+        lidar = QCarLidar(
+            numMeasurements=NUM_MEASUREMENTS,
+            rangingDistanceMode=RANGING_MODE,
+            interpolationMode=INTERP_MODE,
+        )
+        time.sleep(2.0)
+        print("LiDAR ready. Starting display ...")
+        time.sleep(0.5)
+    else:
+        print("DEMO MODE — no hardware. Starting in 1s ...")
+        time.sleep(1.0)
+
+    # ── terminal raw mode ─────────────────────────────────────
+    old_term = setup_terminal()
+    sys.stdout.write(clear_screen())
+    sys.stdout.flush()
+
+    canvas = make_canvas()
+
+    # ── state ─────────────────────────────────────────────────
+    mode          = "DRIVE"
+    steer_rad     = 0.0
+    throttle      = 0.0
+    scan_count    = 0
+    fps_smooth    = 0.0
+    t_last        = time.time()
+    auto_switches = 0
+    distances     = np.zeros(NUM_MEASUREMENTS)
+    angles_rad    = np.linspace(0, 2*math.pi, NUM_MEASUREMENTS, endpoint=False)
+    min_front     = None
+    min_rear      = None
+    gap_result    = None
+    safety_str    = "INITIALISING"
+    safety_col    = C_GREY
+    motor_cut     = False
+
+    try:
+        while True:
+            t0 = time.time()
+
+            # ── key input ─────────────────────────────────────
+            key = read_key()
+            if key:
+                if key in ('q', 'Q', '\x03'):   # q or Ctrl-C
+                    break
+                elif key in ('d', 'D'):
+                    mode = "DRIVE"
+                elif key in ('r', 'R'):
+                    mode = "REVERSE"
+
+            # ── LiDAR read ────────────────────────────────────
+            if HARDWARE and lidar:
+                lidar.read()
+                distances  = lidar.distances.flatten()
+                angles_rad = lidar.angles.flatten()
+            else:
+                distances, angles_rad = demo_scan()
+
+            # ── blocked checks ────────────────────────────────
+            front_blocked = arc_blocked(
+                distances, angles_rad,
+                FRONT_CENTER_DEG, FORWARD_ARC_DEG, UNSAFE_M, BLOCKED_FRAC)
+            rear_blocked  = arc_blocked(
+                distances, angles_rad,
+                REAR_CENTER_DEG,  FORWARD_ARC_DEG, UNSAFE_M, BLOCKED_FRAC)
+
+            min_front = arc_min_dist(distances, angles_rad,
+                                     FRONT_CENTER_DEG, FORWARD_ARC_DEG)
+            min_rear  = arc_min_dist(distances, angles_rad,
+                                     REAR_CENTER_DEG,  FORWARD_ARC_DEG)
+
+            # ── auto mode switch ──────────────────────────────
+            motor_cut = False
+            if mode == "DRIVE" and front_blocked:
+                if not rear_blocked:
+                    mode = "REVERSE"; auto_switches += 1
+                else:
+                    throttle = 0.0; steer_rad = 0.0
+                    safety_str = "BOTH BLOCKED — STOPPED"
+                    safety_col  = C_UNSAFE
+                    motor_cut   = True
+
+            elif mode == "REVERSE" and rear_blocked:
+                if not front_blocked:
+                    mode = "DRIVE"; auto_switches += 1
+                else:
+                    throttle = 0.0; steer_rad = 0.0
+                    safety_str = "BOTH BLOCKED — STOPPED"
+                    safety_col  = C_UNSAFE
+                    motor_cut   = True
+
+            # ── gap + steering ────────────────────────────────
+            if not motor_cut:
+                travel_center = (FRONT_CENTER_DEG if mode == "DRIVE"
+                                 else REAR_CENTER_DEG)
+                gap_result = find_best_gap(
+                    distances, angles_rad, travel_center, GAP_SEARCH_DEG)
+
+                if gap_result:
+                    _, gap_w, steer_err = gap_result
+                    steer_rad = float(np.clip(
+                        steer_err * STEER_GAIN, -MAX_STEER_RAD, MAX_STEER_RAD))
+                    throttle  = (DRIVE_THROTTLE if mode == "DRIVE"
+                                 else REVERSE_THROTTLE)
+
+                    cur_min = min_front if mode == "DRIVE" else min_rear
+                    if cur_min is None or cur_min > MODERATE_M:
+                        safety_str = f"SAFE     {cur_min:.2f}m" if cur_min else "SAFE"
+                        safety_col  = C_SAFE
+                    elif cur_min > UNSAFE_M:
+                        safety_str = f"MODERATE {cur_min:.2f}m"
+                        safety_col  = C_MOD
+                    else:
+                        safety_str = f"UNSAFE   {cur_min:.2f}m"
+                        safety_col  = C_UNSAFE
+                        throttle    = 0.0
+                        motor_cut   = True
+                else:
+                    throttle  = 0.0; steer_rad = 0.0
+                    safety_str = "NO GAP FOUND"
+                    safety_col  = C_MOD
+                    gap_result  = None
+
+            # ── motor write ───────────────────────────────────
+            if HARDWARE and card:
+                motor_buf[0] = throttle
+                motor_buf[1] = steer_rad
+                try:
+                    card.write_other(MOTOR_CH, 2, motor_buf)
+                    card.read_encoder(ENC_CH, 1, enc_buf)
+                    encoder_m = int(enc_buf[0]) * METRES_PER_COUNT
+                except HILError:
+                    pass
+
+            # ── FPS ───────────────────────────────────────────
+            now = time.time()
+            fps_smooth = fps_smooth * 0.85 + (1.0 / max(now - t_last, 1e-4)) * 0.15
+            t_last = now
+            scan_count += 1
+
+            # ── render ────────────────────────────────────────
+            render_frame(
+                canvas, mode, safety_str, safety_col, steer_rad,
+                throttle, min_front, min_rear, gap_result,
+                scan_count, fps_smooth, auto_switches, encoder_m,
+                distances, angles_rad
+            )
+
+            # ── pace ──────────────────────────────────────────
+            elapsed = time.time() - t0
+            sleep_t = LOOP_PERIOD - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+    except Exception as e:
+        restore_terminal(old_term)
+        sys.stdout.write(show_cursor() + "\n")
+        print(f"Error: {e}")
+        import traceback; traceback.print_exc()
+
+    finally:
+        # ── always restore terminal + stop hardware ───────────
+        restore_terminal(old_term)
+        sys.stdout.write(show_cursor())
+        sys.stdout.write(move(CANVAS_ROWS + 5, 1))
+        sys.stdout.flush()
+        print("\n[shutdown] Stopping ...")
+
+        if HARDWARE:
+            if card:
+                try:
+                    card.write_other(MOTOR_CH, 2,
+                                     np.array([0.0, 0.0], dtype=np.float64))
+                    print("[shutdown] Motor stopped")
+                    card.close()
+                    print("[shutdown] HIL closed")
+                except HILError as e:
+                    print(f"[shutdown] HIL error: {e.get_error_message()}")
+            if lidar:
+                try:
+                    lidar.terminate()
+                    print("[shutdown] LiDAR terminated")
+                except Exception as ex:
+                    print(f"[shutdown] LiDAR: {ex}")
+        print("[shutdown] Done.")
+
+
+if __name__ == "__main__":
+    main()
