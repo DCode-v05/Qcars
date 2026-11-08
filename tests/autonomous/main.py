@@ -125,7 +125,6 @@ def main():
     except (OSError, AttributeError):
         pass
 
-    # Determine goal
     has_goal = not args.no_goal and args.goal_x is not None
     goal_x = args.goal_x if args.goal_x is not None else 0.0
     goal_y = args.goal_y if args.goal_y is not None else 0.0
@@ -146,7 +145,6 @@ def main():
     print("  Controls: q=quit  d=drive  r=reverse  a=auto")
     print("-" * 62)
 
-    # ── Build modules ─────────────────────────────────────────────────────
     sensors   = SensorManager()
     detector  = ObstacleDetector()
     nav       = Navigator()
@@ -174,7 +172,6 @@ def main():
     if not args.no_yolo:
         yolo = YOLOProcessor(model_path, cam_queues, stores=stores)
 
-    # ── Open hardware ─────────────────────────────────────────────────────
     sensors.open()
     atexit.register(_force_shutdown, sensors, yolo, dash)
 
@@ -190,7 +187,6 @@ def main():
     localizer.reset()
     grid.reset()
 
-    # ── Timing ────────────────────────────────────────────────────────────
     start_t       = time.perf_counter()
     last_t        = start_t
     last_print    = 0.0
@@ -208,23 +204,19 @@ def main():
             tick_start = time.perf_counter()
             elapsed    = tick_start - start_t
 
-            # ── 1. Read sensors ───────────────────────────────────────────
             data = sensors.read()
             tick_count += 1
 
             if _shutdown.is_set():
                 break
 
-            # ── 2. Compute dt ─────────────────────────────────────────────
             now = time.perf_counter()
             dt  = max(now - last_t, 1e-4)
             last_t = now
 
-            # ── 3. Update position (dead reckoning) ───────────────────────
             throttle_sign = 1.0 if last_throttle >= 0 else -1.0
             pose = localizer.update(data, dt, throttle_sign)
 
-            # ── 4. Update occupancy grid from LiDAR (at GRID_UPDATE_HZ) ──
             if elapsed - last_grid_t >= 1.0 / cfg.GRID_UPDATE_HZ:
                 grid.update(pose,
                             data['lidar_distances'],
@@ -232,7 +224,6 @@ def main():
                             data['lidar_valid'])
                 last_grid_t = elapsed
 
-            # ── 5. A* replan (at ASTAR_REPLAN_HZ) ────────────────────────
             if has_goal and not goal_reached:
                 if elapsed - last_replan_t >= 1.0 / cfg.ASTAR_REPLAN_HZ:
                     if planner.needs_replan(pose):
@@ -243,13 +234,11 @@ def main():
                             logging.info("[A*] No path found -- reactive mode")
                     last_replan_t = elapsed
 
-                # Check goal reached
                 if planner.is_goal_reached(pose):
                     goal_reached = True
                     logging.info(f"[GOAL] REACHED! at ({pose[0]:.2f}, {pose[1]:.2f})")
                     print(f"\n*** GOAL REACHED at ({pose[0]:.2f}, {pose[1]:.2f}) ***\n")
 
-            # ── 6. Compute goal heading for DWA ───────────────────────────
             if has_goal and not goal_reached and planner.path_found:
                 goal_heading = planner.get_goal_heading(pose)
                 if goal_heading is not None:
@@ -259,7 +248,6 @@ def main():
             else:
                 detector.set_goal_heading(0.0)
 
-            # ── 7. Push frames to YOLO queues ─────────────────────────────
             frames = data['csi_frames']
             for i, frame in enumerate(frames):
                 q = cam_queues[i]
@@ -269,17 +257,14 @@ def main():
                 try: q.put_nowait(frame)
                 except queue.Full: pass
 
-            # ── 8. Battery check ──────────────────────────────────────────
             batt = data['battery_voltage']
             if batt < cfg.BATTERY_CRIT_V and batt > 1.0:
                 print(f"\n[SAFETY] Battery critical: {batt:.2f}V -- stopping.")
                 break
 
-            # ── 9. Obstacle detection (LiDAR + YOLO + depth) ─────────────
             yolo_dets = yolo.get_detections() if yolo else []
             detection = detector.detect(data, yolo_dets)
 
-            # ── 10. Navigate ──────────────────────────────────────────────
             imu_accel = data.get('accelerometer')
             imu_gyro  = data.get('gyroscope')
             nav_result = nav.update(detection, dt,
@@ -289,7 +274,6 @@ def main():
             state    = nav_result['state']
             leds     = nav_result['leds']
 
-            # Stop if goal reached
             if goal_reached:
                 throttle = 0.0
                 steering = 0.0
@@ -302,16 +286,13 @@ def main():
             if nav_result.get('oscillation_detected'):
                 print(f"\n[IMU] OSCILLATION DETECTED -- recovery!")
 
-            # ── 11. Send to hardware ──────────────────────────────────────
             sensors.write_command(throttle=throttle, steering=steering,
                                  leds=leds)
 
-            # ── 11b. Record all sensor data ──────────────────────────────
             if recorder:
                 recorder.record_tick(data, detection, nav_result, pose,
                                      throttle, steering)
 
-            # ── 12. Push data to dashboard ────────────────────────────────
             if dash:
                 dash.update_lidar(data['lidar_distances'],
                                   data['lidar_angles'],
@@ -319,14 +300,12 @@ def main():
                 dash.update_nav(detection, nav_result)
                 dash.update_detections(yolo_dets)
                 dash.update_realsense(data['rs_rgb'], data['rs_depth_m'])
-                # Push map + path (at lower rate to save bandwidth)
                 if tick_count % 10 == 0:
                     map_pts = grid.get_map_data()
                     path_pts = planner.get_path_points() if has_goal else []
                     dash.update_map(map_pts, path_pts, pose,
                                    (goal_x, goal_y) if has_goal else None)
 
-            # ── 13. Terminal print every 0.5s ─────────────────────────────
             if elapsed - last_print >= 0.5:
                 zone     = detection['zone']
                 dist     = detection['distance_m']
@@ -363,7 +342,6 @@ def main():
                 )
                 last_print = elapsed
 
-            # ── 14. Pacing ────────────────────────────────────────────────
             tick_elapsed = time.perf_counter() - tick_start
             sleep_time = cfg.LOOP_DT - tick_elapsed
             if sleep_time > 0:

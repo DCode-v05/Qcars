@@ -22,8 +22,6 @@ from obstacle_detector import (
 )
 
 
-# ── Shared state ──────────────────────────────────────────────────────────────
-
 class _State:
     def __init__(self):
         self._lock       = threading.Lock()
@@ -118,8 +116,6 @@ class _State:
 _s = _State()
 
 
-# ── Fast image generators ────────────────────────────────────────────────────
-
 def _cam_jpeg(frame):
     if frame is None:
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -211,12 +207,8 @@ class _LidarRenderer:
         return buf.read()
 
 
-# ── Flask ─────────────────────────────────────────────────────────────────────
-
 _app = Flask(__name__)
 
-# HTML loaded ONCE by the browser — never reloaded.
-# All data updates via fetch('/api/data') + DOM manipulation.
 _HTML = """<!DOCTYPE html><html><head>
 <title>QCar 2</title>
 <style>
@@ -363,8 +355,6 @@ def depth():
     return Response(_s.get_depth(), mimetype='image/png',
                     headers={'Cache-Control': 'no-store'})
 
-
-# ── Public API ────────────────────────────────────────────────────────────────
 
 class Dashboard:
 

@@ -16,40 +16,32 @@ import time
 from quanser.hardware import HIL, EncoderQuadratureMode
 from quanser.hardware.exceptions import HILError
 
-# ══════════════════════════════════════════════════════════════
-# QCar 2 — CORRECT Channel Map (from official docs)
-# ══════════════════════════════════════════════════════════════
 CARD_TYPE         = "qcar2"
 CARD_ID           = "0"
 
-THROTTLE_CHANNEL  = 11000     # Other Output — motor throttle (%)
-STEERING_CHANNEL  = 1000      # Other Output — steering angle (rad)
+THROTTLE_CHANNEL  = 11000
+STEERING_CHANNEL  = 1000
 
-ENCODER_CHANNEL   = 0         # Encoder Input — motor encoder (J24)
+ENCODER_CHANNEL   = 0
 
-# Encoder math
 COUNTS_PER_REV    = 720
 QUADRATURE        = 4
-COUNTS_PER_REV_X4 = COUNTS_PER_REV * QUADRATURE   # 2880
+COUNTS_PER_REV_X4 = COUNTS_PER_REV * QUADRATURE
 WHEEL_RADIUS_M    = 0.0328
 WHEEL_CIRCUM_M    = 2 * np.pi * WHEEL_RADIUS_M
 METRES_PER_COUNT  = WHEEL_CIRCUM_M / COUNTS_PER_REV_X4
 
-# ── Test Profile ──────────────────────────────────────────────
-# (throttle_%, duration_sec, label)
-# Throttle: -1.0 = full reverse, 0.0 = stop, +1.0 = full forward
 TEST_PHASES = [
-    ( 0.00, 1.0, "IDLE    "),   # confirm encoder stable at rest
-    ( 0.10, 3.0, "FWD 10% "),   # gentle forward
-    ( 0.15, 3.0, "FWD 15% "),   # slightly faster
-    ( 0.00, 2.0, "COAST   "),   # cut motor, watch coast
-    (-0.10, 3.0, "REV 10% "),   # gentle reverse
-    ( 0.00, 2.0, "STOP    "),   # final stop
+    ( 0.00, 1.0, "IDLE    "),
+    ( 0.10, 3.0, "FWD 10% "),
+    ( 0.15, 3.0, "FWD 15% "),
+    ( 0.00, 2.0, "COAST   "),
+    (-0.10, 3.0, "REV 10% "),
+    ( 0.00, 2.0, "STOP    "),
 ]
 
 SAMPLE_RATE_HZ  = 50
 SAMPLE_PERIOD   = 1.0 / SAMPLE_RATE_HZ
-# ══════════════════════════════════════════════════════════════
 
 
 def counts_to_metres(counts):
@@ -65,14 +57,12 @@ def main():
     print(f"  Total duration   : {sum(p[1] for p in TEST_PHASES):.0f}s")
     print("═" * 58)
 
-    # ── Safety confirmation ───────────────────────────────────
     print("\n⚠️  CONFIRM: QCar 2 is LIFTED OFF THE GROUND")
     confirm = input("   Type 'yes' to continue: ").strip().lower()
     if confirm != "yes":
         print("Aborted.")
         return
 
-    # ── Open HIL board ────────────────────────────────────────
     print("\n[1/4] Opening HIL board ...")
     try:
         card = HIL(CARD_TYPE, CARD_ID)
@@ -81,20 +71,14 @@ def main():
         print(f"      ❌ {e.get_error_message()}")
         return
 
-    # ── Channel arrays ────────────────────────────────────────
-    # Encoder
     enc_channels = np.array([ENCODER_CHANNEL], dtype=np.uint32)
     enc_buffer   = np.zeros(1, dtype=np.int32)
 
-    # Motor + Steering — write_other uses channel numbers 11000, 1000
     motor_channels = np.array([THROTTLE_CHANNEL, STEERING_CHANNEL],
                                dtype=np.uint32)
     motor_buffer   = np.array([0.0, 0.0], dtype=np.float64)
-    #                                ↑           ↑
-    #                            throttle     steering=0 (straight)
 
     try:
-        # ── Configure encoder ─────────────────────────────────
         print("[2/4] Configuring encoder ...")
         modes = np.array([EncoderQuadratureMode.X4], dtype=np.int32)
         card.set_encoder_quadrature_mode(enc_channels, 1, modes)
@@ -102,12 +86,10 @@ def main():
                                 np.zeros(1, dtype=np.int32))
         print("      ✅ X4 quadrature, counter zeroed")
 
-        # ── Zero motor at start ───────────────────────────────
         print("[3/4] Zeroing motor + steering ...")
         card.write_other(motor_channels, 2, motor_buffer)
         print(f"      ✅ throttle=0.0  steering=0.0 rad")
 
-        # ── Test loop ─────────────────────────────────────────
         print("[4/4] Starting test profile ...\n")
         print(f"  {'Time':>6}  {'Phase':<12}  {'Throttle':>9}  "
               f"{'Counts':>8}  {'Dist(m)':>9}  {'Speed(m/s)':>11}")
@@ -119,9 +101,8 @@ def main():
 
         for throttle, duration, label in TEST_PHASES:
 
-            # Write throttle + keep steering straight (0.0 rad)
-            motor_buffer[0] = throttle   # throttle channel 11000
-            motor_buffer[1] = 0.0        # steering channel 1000
+            motor_buffer[0] = throttle
+            motor_buffer[1] = 0.0
             card.write_other(motor_channels, 2, motor_buffer)
 
             phase_end = time.time() + duration
@@ -129,7 +110,6 @@ def main():
             while time.time() < phase_end:
                 t_loop = time.time()
 
-                # Read encoder
                 card.read_encoder(enc_channels, 1, enc_buffer)
                 now          = time.time()
                 curr_counts  = int(enc_buffer[0])
@@ -158,7 +138,7 @@ def main():
                 if sleep > 0:
                     time.sleep(sleep)
 
-            print()   # newline between phases
+            print()
 
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted — stopping motor ...")
@@ -167,7 +147,6 @@ def main():
         print(f"\n❌ HILError: {e.get_error_message()}")
 
     finally:
-        # ── ALWAYS stop motor ─────────────────────────────────
         print("\n── Cleanup ───────────────────────────────────────────")
         try:
             stop_buf = np.array([0.0, 0.0], dtype=np.float64)
@@ -176,7 +155,6 @@ def main():
         except Exception as e:
             print(f"  ⚠️  Motor stop: {e}")
 
-        # Final encoder reading
         try:
             card.read_encoder(enc_channels, 1, enc_buffer)
             fc = int(enc_buffer[0])

@@ -30,7 +30,6 @@ Keys (press then Enter):
 import sys, os, math, time, select, tty, termios
 import numpy as np
 
-# ── optional hardware ──────────────────────────────────────────
 try:
     from pal.products.qcar import QCarLidar
     from quanser.hardware import HIL, EncoderQuadratureMode
@@ -39,15 +38,9 @@ try:
 except ImportError:
     HARDWARE = False
 
-# ══════════════════════════════════════════════════════════════
-#  CALIBRATION
-# ══════════════════════════════════════════════════════════════
 FRONT_CENTER_DEG = 180.0
 REAR_CENTER_DEG  = (FRONT_CENTER_DEG + 180.0) % 360.0
 
-# ══════════════════════════════════════════════════════════════
-#  SAFETY & MOTION
-# ══════════════════════════════════════════════════════════════
 UNSAFE_M         = 1.00
 MODERATE_M       = 2.0
 MAX_RANGE_M      = 6.0
@@ -61,9 +54,6 @@ FORWARD_ARC_DEG  = 20.0
 BLOCKED_FRAC     = 0.80
 GAP_SEARCH_DEG   = 180.0
 
-# ══════════════════════════════════════════════════════════════
-#  HARDWARE CONFIG
-# ══════════════════════════════════════════════════════════════
 CARD_TYPE        = "qcar2"
 CARD_ID          = "0"
 THROTTLE_CH      = 11000
@@ -77,30 +67,19 @@ INTERP_MODE      = 0
 LOOP_HZ          = 8
 LOOP_PERIOD      = 1.0 / LOOP_HZ
 
-# ══════════════════════════════════════════════════════════════
-#  TERMINAL CANVAS
-# ══════════════════════════════════════════════════════════════
-# Each terminal cell = 1 col wide, ~2 rows tall visually.
-# We use a pixel grid where 1 pixel = 1 terminal cell.
-# Upper-half block ▀  lets us pack 2 vertical pixels per cell
-# using fg (top pixel) and bg (bottom pixel).
 
-CANVAS_COLS = 74     # terminal columns for radar
-CANVAS_ROWS = 38     # terminal rows  for radar  (×2 = 76 pixel rows)
+CANVAS_COLS = 74
+CANVAS_ROWS = 38
 PIX_COLS    = CANVAS_COLS
-PIX_ROWS    = CANVAS_ROWS * 2      # 76 pixel rows
+PIX_ROWS    = CANVAS_ROWS * 2
 
-RADAR_CX    = PIX_COLS  // 2      # pixel centre
+RADAR_CX    = PIX_COLS  // 2
 RADAR_CY    = PIX_ROWS  // 2
-RADAR_R     = min(RADAR_CX, RADAR_CY) - 2   # pixel radius
+RADAR_R     = min(RADAR_CX, RADAR_CY) - 2
 
-# Right panel starts at column CANVAS_COLS + 1
 PANEL_COL   = CANVAS_COLS + 2
 PANEL_WIDTH = 44
 
-# ══════════════════════════════════════════════════════════════
-#  ANSI HELPERS
-# ══════════════════════════════════════════════════════════════
 ESC = "\033"
 
 def fg(r, g, b):        return f"{ESC}[38;2;{r};{g};{b}m"
@@ -114,7 +93,6 @@ def hide_cursor():      return f"{ESC}[?25l"
 def show_cursor():      return f"{ESC}[?25h"
 def clear_line():       return f"{ESC}[2K"
 
-# Palette
 C_BG      = (  4,   8,  15)
 C_PANEL   = (  8,  15,  26)
 C_BORDER  = ( 15,  42,  74)
@@ -142,9 +120,6 @@ def dist_color(d):
     return (r, g, b)
 
 
-# ══════════════════════════════════════════════════════════════
-#  PIXEL CANVAS  (RGB numpy array)
-# ══════════════════════════════════════════════════════════════
 def make_canvas():
     c = np.zeros((PIX_ROWS, PIX_COLS, 3), dtype=np.uint8)
     c[:, :] = C_BG
@@ -198,9 +173,6 @@ def draw_dot(canvas, px, py, color, r=2):
                 set_pixel(canvas, px + dx, py + dy, color)
 
 
-# ══════════════════════════════════════════════════════════════
-#  RENDER CANVAS → TERMINAL STRING
-# ══════════════════════════════════════════════════════════════
 def canvas_to_terminal(canvas):
     """
     Pack 2 pixel rows into 1 terminal row using ▀ (upper half block).
@@ -208,7 +180,7 @@ def canvas_to_terminal(canvas):
     """
     out = []
     for row in range(0, PIX_ROWS - 1, 2):
-        out.append(move(row // 2 + 2, 1))   # +2 for header row
+        out.append(move(row // 2 + 2, 1))
         prev_top = prev_bot = None
         for col in range(PIX_COLS):
             top = tuple(canvas[row,     col])
@@ -226,14 +198,10 @@ def canvas_to_terminal(canvas):
     return "".join(out)
 
 
-# ══════════════════════════════════════════════════════════════
-#  POLAR DRAW HELPERS
-# ══════════════════════════════════════════════════════════════
 def polar_to_pixel(dist_m, angle_rad):
     """LiDAR polar → pixel (px, py) on canvas."""
     r_px  = min(dist_m / MAX_RANGE_M, 1.0) * RADAR_R
     front = math.radians(FRONT_CENTER_DEG)
-    # 0° = top of screen (forward)
     sa    = (angle_rad - front) - math.pi / 2
     px    = RADAR_CX + int(r_px * math.cos(sa))
     py    = RADAR_CY + int(r_px * math.sin(sa))
@@ -242,15 +210,12 @@ def polar_to_pixel(dist_m, angle_rad):
 
 def draw_grid(canvas):
     """Range rings + spokes on pixel canvas."""
-    # rings
     for rm in [1.0, 2.0, 3.0, MAX_RANGE_M]:
         rp = int(rm / MAX_RANGE_M * RADAR_R)
         draw_circle_pixels(canvas, RADAR_CX, RADAR_CY, rp, C_GRID)
 
-    # outer ring brighter
     draw_circle_pixels(canvas, RADAR_CX, RADAR_CY, RADAR_R, C_BORDER)
 
-    # spokes every 45°
     front = math.radians(FRONT_CENTER_DEG)
     for deg in range(0, 360, 45):
         a  = math.radians(deg) + front - math.pi / 2
@@ -299,7 +264,6 @@ def draw_steering_arrow(canvas, steer_rad, mode):
     ex = RADAR_CX + int(length * sign * math.cos(angle))
     ey = RADAR_CY + int(length * sign * math.sin(angle))
     draw_line_pixels(canvas, RADAR_CX, RADAR_CY, ex, ey, col)
-    # arrowhead
     for da in (-0.45, 0.45):
         hx = ex + int(8 * math.cos(angle + math.pi + da))
         hy = ey + int(8 * math.sin(angle + math.pi + da))
@@ -324,9 +288,6 @@ def draw_compass_labels(canvas):
         draw_dot(canvas, px, py, col, 2)
 
 
-# ══════════════════════════════════════════════════════════════
-#  RIGHT PANEL  (pure text, printed alongside canvas)
-# ══════════════════════════════════════════════════════════════
 def bar_str(frac, width=20, col_on=C_SAFE, col_off=C_BORDER):
     frac   = max(0.0, min(1.0, frac))
     filled = int(frac * width)
@@ -433,9 +394,6 @@ def panel_lines(mode, safety_str, safety_col, steer_rad,
     return lines
 
 
-# ══════════════════════════════════════════════════════════════
-#  GEOMETRY / SAFETY LOGIC  (same as pygame version)
-# ══════════════════════════════════════════════════════════════
 def angle_diff(a, b):
     return math.atan2(math.sin(a - b), math.cos(a - b))
 
@@ -486,9 +444,6 @@ def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     return best_c, math.degrees(best_w), angle_diff(best_c, cr)
 
 
-# ══════════════════════════════════════════════════════════════
-#  DEMO DATA
-# ══════════════════════════════════════════════════════════════
 _demo_t = 0.0
 
 def demo_scan():
@@ -504,9 +459,6 @@ def demo_scan():
     return dists, angles
 
 
-# ══════════════════════════════════════════════════════════════
-#  NON-BLOCKING KEYPRESS  (no Enter needed)
-# ══════════════════════════════════════════════════════════════
 def setup_terminal():
     """Switch terminal to raw mode — returns old settings."""
     fd   = sys.stdin.fileno()
@@ -526,15 +478,11 @@ def read_key():
     return None
 
 
-# ══════════════════════════════════════════════════════════════
-#  FULL FRAME RENDER
-# ══════════════════════════════════════════════════════════════
 def render_frame(canvas, mode, safety_str, safety_col, steer_rad,
                  throttle, min_front, min_rear, gap_result,
                  scan_count, fps, auto_switches, encoder_m,
                  distances, angles_rad):
 
-    # ── draw on pixel canvas ──────────────────────────────────
     canvas[:] = C_BG
     draw_grid(canvas)
     draw_radar_points(canvas, distances, angles_rad)
@@ -544,10 +492,8 @@ def render_frame(canvas, mode, safety_str, safety_col, steer_rad,
     draw_car_icon(canvas, mode)
     draw_compass_labels(canvas)
 
-    # ── convert canvas → terminal escape string ───────────────
     radar_str = canvas_to_terminal(canvas)
 
-    # ── build right panel lines ───────────────────────────────
     gw = gap_result[1] if gap_result else 0.0
     plines = panel_lines(
         mode, safety_str, safety_col, steer_rad,
@@ -555,11 +501,9 @@ def render_frame(canvas, mode, safety_str, safety_col, steer_rad,
         gw, scan_count, fps, auto_switches, encoder_m
     )
 
-    # ── assemble full output buffer ───────────────────────────
     buf = []
     buf.append(hide_cursor())
 
-    # header bar row 1
     buf.append(move(1, 1))
     mode_col = C_SAFE if mode == "DRIVE" else C_MOD
     hdr = (
@@ -576,28 +520,21 @@ def render_frame(canvas, mode, safety_str, safety_col, steer_rad,
     )
     buf.append(hdr)
 
-    # radar canvas (rows 2 .. CANVAS_ROWS+1)
     buf.append(radar_str)
 
-    # range labels on radar (right side of rings)
     ring_labels = [(1.0,"1m"),(2.0,"2m"),(3.0,"3m"),(MAX_RANGE_M,f"{MAX_RANGE_M:.0f}m")]
     for rm, lbl in ring_labels:
         rp  = int(rm / MAX_RANGE_M * RADAR_R)
-        # pixel col → terminal col (each pixel = 1 col)
         tc  = RADAR_CX + rp + 1
-        # pixel row → terminal row  (2 pixels per terminal row)
         tr  = RADAR_CY // 2 + 2
         buf.append(move(tr, tc + 1))
         buf.append(dim_ansi() + fg(*C_DIM) + lbl + reset())
 
-    # right panel lines
     for i, line in enumerate(plines):
         buf.append(move(i + 2, PANEL_COL))
         buf.append(line)
-        # pad/clear rest of line
         buf.append(fg(*C_BG) + " " * 4 + reset())
 
-    # bottom status bar
     bot_row = CANVAS_ROWS + 3
     buf.append(move(bot_row, 1))
     buf.append(
@@ -614,11 +551,7 @@ def render_frame(canvas, mode, safety_str, safety_col, steer_rad,
     sys.stdout.flush()
 
 
-# ══════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════
 def main():
-    # ── hardware init ─────────────────────────────────────────
     card = None; lidar = None
     motor_buf = np.array([0.0, 0.0], dtype=np.float64)
     enc_buf   = np.zeros(1, dtype=np.int32)
@@ -650,14 +583,12 @@ def main():
         print("DEMO MODE — no hardware. Starting in 1s ...")
         time.sleep(1.0)
 
-    # ── terminal raw mode ─────────────────────────────────────
     old_term = setup_terminal()
     sys.stdout.write(clear_screen())
     sys.stdout.flush()
 
     canvas = make_canvas()
 
-    # ── state ─────────────────────────────────────────────────
     mode          = "DRIVE"
     steer_rad     = 0.0
     throttle      = 0.0
@@ -678,17 +609,15 @@ def main():
         while True:
             t0 = time.time()
 
-            # ── key input ─────────────────────────────────────
             key = read_key()
             if key:
-                if key in ('q', 'Q', '\x03'):   # q or Ctrl-C
+                if key in ('q', 'Q', '\x03'):
                     break
                 elif key in ('d', 'D'):
                     mode = "DRIVE"
                 elif key in ('r', 'R'):
                     mode = "REVERSE"
 
-            # ── LiDAR read ────────────────────────────────────
             if HARDWARE and lidar:
                 lidar.read()
                 distances  = lidar.distances.flatten()
@@ -696,7 +625,6 @@ def main():
             else:
                 distances, angles_rad = demo_scan()
 
-            # ── blocked checks ────────────────────────────────
             front_blocked = arc_blocked(
                 distances, angles_rad,
                 FRONT_CENTER_DEG, FORWARD_ARC_DEG, UNSAFE_M, BLOCKED_FRAC)
@@ -709,7 +637,6 @@ def main():
             min_rear  = arc_min_dist(distances, angles_rad,
                                      REAR_CENTER_DEG,  FORWARD_ARC_DEG)
 
-            # ── auto mode switch ──────────────────────────────
             motor_cut = False
             if mode == "DRIVE" and front_blocked:
                 if not rear_blocked:
@@ -729,7 +656,6 @@ def main():
                     safety_col  = C_UNSAFE
                     motor_cut   = True
 
-            # ── gap + steering ────────────────────────────────
             if not motor_cut:
                 travel_center = (FRONT_CENTER_DEG if mode == "DRIVE"
                                  else REAR_CENTER_DEG)
@@ -761,7 +687,6 @@ def main():
                     safety_col  = C_MOD
                     gap_result  = None
 
-            # ── motor write ───────────────────────────────────
             if HARDWARE and card:
                 motor_buf[0] = throttle
                 motor_buf[1] = steer_rad
@@ -772,13 +697,11 @@ def main():
                 except HILError:
                     pass
 
-            # ── FPS ───────────────────────────────────────────
             now = time.time()
             fps_smooth = fps_smooth * 0.85 + (1.0 / max(now - t_last, 1e-4)) * 0.15
             t_last = now
             scan_count += 1
 
-            # ── render ────────────────────────────────────────
             render_frame(
                 canvas, mode, safety_str, safety_col, steer_rad,
                 throttle, min_front, min_rear, gap_result,
@@ -786,7 +709,6 @@ def main():
                 distances, angles_rad
             )
 
-            # ── pace ──────────────────────────────────────────
             elapsed = time.time() - t0
             sleep_t = LOOP_PERIOD - elapsed
             if sleep_t > 0:
@@ -799,7 +721,6 @@ def main():
         import traceback; traceback.print_exc()
 
     finally:
-        # ── always restore terminal + stop hardware ───────────
         restore_terminal(old_term)
         sys.stdout.write(show_cursor())
         sys.stdout.write(move(CANVAS_ROWS + 5, 1))

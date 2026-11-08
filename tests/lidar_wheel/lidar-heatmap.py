@@ -27,7 +27,6 @@ import math
 import time
 import numpy as np
 
-# ── optional hardware imports ──────────────────────────────────
 try:
     from pal.products.qcar import QCarLidar
     from quanser.hardware import HIL, EncoderQuadratureMode
@@ -39,34 +38,23 @@ except ImportError:
 import pygame
 from pygame import gfxdraw
 
-# ══════════════════════════════════════════════════════════════
-#  CALIBRATION  ← paste your value from lidar_diag.py here
-# ══════════════════════════════════════════════════════════════
-FRONT_CENTER_DEG = 180.0          # angle (deg) that points to QCar nose
+FRONT_CENTER_DEG = 180.0
 REAR_CENTER_DEG  = (FRONT_CENTER_DEG + 180.0) % 360.0
 
-# ══════════════════════════════════════════════════════════════
-#  SAFETY & MOTION CONFIG
-# ══════════════════════════════════════════════════════════════
-UNSAFE_M         = 0.50         # <= this  →  UNSAFE / motor cut
-MODERATE_M       = 1.00         # <= this  →  MODERATE warning
-MAX_RANGE_M      = 6.0          # display + logic clamp
+UNSAFE_M         = 0.50
+MODERATE_M       = 1.00
+MAX_RANGE_M      = 6.0
 
 DRIVE_THROTTLE   =  0.12
 REVERSE_THROTTLE = -0.12
-MAX_STEER_RAD    =  0.40        # physical steering limit (rad)
-STEER_GAIN       =  0.6         # how aggressively to chase gap centre
+MAX_STEER_RAD    =  0.40
+STEER_GAIN       =  0.6
 
-# Forward / rear scan arcs for blocked detection
-FORWARD_ARC_DEG  = 60.0         # ±60° cone in front
-BLOCKED_FRAC     = 0.80         # fraction of arc readings unsafe → "blocked"
+FORWARD_ARC_DEG  = 60.0
+BLOCKED_FRAC     = 0.80
 
-# Gap search arc (wider — where to look for best gap)
-GAP_SEARCH_DEG   = 150.0        # search ±150° in direction of travel
+GAP_SEARCH_DEG   = 150.0
 
-# ══════════════════════════════════════════════════════════════
-#  HARDWARE CONFIG  (from rot.py)
-# ══════════════════════════════════════════════════════════════
 CARD_TYPE        = "qcar2"
 CARD_ID          = "0"
 THROTTLE_CH      = 11000
@@ -82,15 +70,11 @@ INTERP_MODE      = 0
 LOOP_HZ          = 10
 LOOP_PERIOD      = 1.0 / LOOP_HZ
 
-# ══════════════════════════════════════════════════════════════
-#  PYGAME WINDOW
-# ══════════════════════════════════════════════════════════════
 WIN_W, WIN_H     = 1100, 700
-RADAR_CX         = 370           # polar plot centre X
-RADAR_CY         = 340           # polar plot centre Y
-RADAR_R          = 300           # polar plot radius (pixels)
+RADAR_CX         = 370
+RADAR_CY         = 340
+RADAR_R          = 300
 
-# Colour palette
 C_BG             = ( 4,  8, 15)
 C_PANEL          = ( 8, 15, 26)
 C_BORDER         = (15, 42, 74)
@@ -102,36 +86,28 @@ C_DIM            = (20, 50, 80)
 C_WHITE          = (200,230,255)
 C_GREY           = ( 80,110,140)
 
-# ── distance → RGB heatmap colour ─────────────────────────────
 def dist_color(d: float) -> tuple:
     """Blue(near) → Cyan → Green → Yellow → Red(far) — inverted for danger."""
     t = max(0.0, min(1.0, d / MAX_RANGE_M))
     if t < 0.25:
-        # Red → Orange  (very close = danger)
         r = 220
         g = int(t / 0.25 * 140)
         b = 0
     elif t < 0.50:
-        # Orange → Yellow
         r = 220
         g = 140 + int((t - 0.25) / 0.25 * 115)
         b = 0
     elif t < 0.75:
-        # Yellow → Green
         r = int(220 - (t - 0.50) / 0.25 * 220)
         g = 220
         b = 0
     else:
-        # Green → Cyan/Blue  (far = safe)
         r = 0
         g = int(220 - (t - 0.75) / 0.25 * 80)
         b = int((t - 0.75) / 0.25 * 180)
     return (r, g, b)
 
 
-# ══════════════════════════════════════════════════════════════
-#  GEOMETRY HELPERS
-# ══════════════════════════════════════════════════════════════
 def angle_diff(a, b):
     """Signed angular difference a-b wrapped to [-π, π]."""
     return math.atan2(math.sin(a - b), math.cos(a - b))
@@ -140,7 +116,6 @@ def angle_diff(a, b):
 def polar_to_screen(dist_m, angle_rad, cx, cy, radius, max_range):
     """Convert (distance, angle) → pixel (x, y) on radar plot."""
     r_px = min(dist_m / max_range, 1.0) * radius
-    # angle_rad 0 = front = up on screen
     front_rad = math.radians(FRONT_CENTER_DEG)
     screen_angle = (angle_rad - front_rad) - math.pi / 2
     x = cx + r_px * math.cos(screen_angle)
@@ -148,9 +123,6 @@ def polar_to_screen(dist_m, angle_rad, cx, cy, radius, max_range):
     return int(x), int(y)
 
 
-# ══════════════════════════════════════════════════════════════
-#  STEERING LOGIC — find widest free gap
-# ══════════════════════════════════════════════════════════════
 def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     """
     Within ±search_half_deg of travel_center:
@@ -161,7 +133,6 @@ def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     center_rad  = math.radians(travel_center_deg)
     search_half = math.radians(search_half_deg)
 
-    # Filter to search arc, sorted by angle
     mask = np.array([
         abs(angle_diff(float(a), center_rad)) <= search_half
         for a in angles_rad
@@ -172,15 +143,12 @@ def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     arc_angles = angles_rad[mask]
     arc_dists  = distances[mask]
 
-    # Sort by angle
     order      = np.argsort(arc_angles)
     arc_angles = arc_angles[order]
     arc_dists  = arc_dists[order]
 
-    # Label each reading as free (> MODERATE_M) or blocked
     free = arc_dists > MODERATE_M
 
-    # Find all contiguous free runs
     best_width  = 0.0
     best_center = None
     run_start   = None
@@ -201,7 +169,7 @@ def find_best_gap(distances, angles_rad, travel_center_deg, search_half_deg):
     if best_center is None:
         return None
 
-    steer_err = angle_diff(best_center, center_rad)   # signed rad
+    steer_err = angle_diff(best_center, center_rad)
     return best_center, math.degrees(best_width), steer_err
 
 
@@ -222,16 +190,12 @@ def arc_blocked(distances, angles_rad, center_deg, half_deg, threshold_m, frac):
     return (blocked.sum() / valid.sum()) >= frac
 
 
-# ══════════════════════════════════════════════════════════════
-#  DEMO DATA  (used when no hardware)
-# ══════════════════════════════════════════════════════════════
 _demo_t = 0.0
 
 def demo_scan():
     global _demo_t
     angles = np.linspace(0, 2 * np.pi, NUM_MEASUREMENTS, endpoint=False)
     base   = 3.5 + 1.5 * np.sin(2 * angles) + 0.8 * np.cos(3 * angles + 1)
-    # moving wall in front
     front  = math.radians(FRONT_CENTER_DEG)
     wall   = 0.45 + 0.3 * abs(math.sin(_demo_t * 0.4))
     blob   = wall * np.exp(-10 * (angles - front) ** 2)
@@ -241,30 +205,23 @@ def demo_scan():
     return dists, angles
 
 
-# ══════════════════════════════════════════════════════════════
-#  PYGAME DRAW HELPERS
-# ══════════════════════════════════════════════════════════════
 def draw_grid(surf, cx, cy, r):
     rings = [1.0, 2.0, 3.0, MAX_RANGE_M]
     for rm in rings:
         rp = int(rm / MAX_RANGE_M * r)
         pygame.draw.circle(surf, C_BORDER, (cx, cy), rp, 1)
-        # label
         lbl = font_sm.render(f"{rm:.0f}m", True, C_DIM)
         surf.blit(lbl, (cx + rp + 3, cy - 8))
 
-    # spokes every 30°
     front_rad = math.radians(FRONT_CENTER_DEG)
     for deg in range(0, 360, 30):
-        a = math.radians(deg) + front_rad - math.pi / 2   # screen coords
+        a = math.radians(deg) + front_rad - math.pi / 2
         ex = cx + r * math.cos(a)
         ey = cy + r * math.sin(a)
         pygame.draw.line(surf, C_BORDER, (cx, cy), (int(ex), int(ey)), 1)
 
-    # Outer ring
     pygame.draw.circle(surf, C_ACCENT, (cx, cy), r, 2)
 
-    # Compass labels  N=front S=rear E=right W=left
     compass = [("FWD", 0), ("R", 90), ("REV", 180), ("L", 270)]
     for label, deg in compass:
         a = math.radians(deg) - math.pi / 2
@@ -283,7 +240,6 @@ def draw_radar(surf, distances, angles_rad):
         col  = dist_color(d)
         sx, sy = polar_to_screen(d, float(angles_rad[i]),
                                  RADAR_CX, RADAR_CY, RADAR_R, MAX_RANGE_M)
-        # glow
         gfxdraw.filled_circle(surf, sx, sy, 4,  (*col, 40))
         gfxdraw.filled_circle(surf, sx, sy, 2,  (*col, 180))
         gfxdraw.aacircle(surf,      sx, sy, 2,  col)
@@ -293,7 +249,6 @@ def draw_gap_arc(surf, gap_center_rad, gap_width_deg, travel_center_deg):
     """Draw a cyan arc showing the detected free gap."""
     half  = math.radians(gap_width_deg / 2)
     front = math.radians(FRONT_CENTER_DEG)
-    # Draw arc as series of line segments
     steps = 30
     pts   = []
     for i in range(steps + 1):
@@ -313,12 +268,11 @@ def draw_steering_arrow(surf, steer_rad, mode):
     col   = C_SAFE if mode == "DRIVE" else C_MOD
     front = math.radians(FRONT_CENTER_DEG)
     sign  = 1 if mode == "DRIVE" else -1
-    angle = front - math.pi / 2 + steer_rad * 2.0   # exaggerate for visibility
+    angle = front - math.pi / 2 + steer_rad * 2.0
     length = 60
     ex = RADAR_CX + int(length * sign * math.cos(angle))
     ey = RADAR_CY + int(length * sign * math.sin(angle))
     pygame.draw.line(surf, col, (RADAR_CX, RADAR_CY), (ex, ey), 3)
-    # arrowhead
     for da in (-0.4, 0.4):
         hx = ex + int(12 * math.cos(angle + math.pi + da))
         hy = ey + int(12 * math.sin(angle + math.pi + da))
@@ -359,13 +313,9 @@ def color_scale_bar(surf, x, y, w, h):
     surf.blit(lbl_far,  (x + w - 24, y + h + 3))
 
 
-# ══════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════
 def main():
     global font_sm, font_lg, font_xl, font_hud
 
-    # ── pygame init ───────────────────────────────────────────
     pygame.init()
     screen = pygame.display.set_mode((WIN_W, WIN_H))
     pygame.display.set_caption("QCar 2 · LiDAR Heatmap + Steering")
@@ -376,7 +326,6 @@ def main():
     font_xl  = pygame.font.SysFont("monospace", 28, bold=True)
     font_hud = pygame.font.SysFont("monospace", 13)
 
-    # ── hardware init ─────────────────────────────────────────
     card  = None
     lidar = None
     enc_buf   = np.zeros(1, dtype=np.int32)
@@ -406,8 +355,7 @@ def main():
     else:
         print("[init] DEMO mode — no hardware detected")
 
-    # ── state ─────────────────────────────────────────────────
-    mode        = "DRIVE"       # "DRIVE" or "REVERSE"
+    mode        = "DRIVE"
     steer_rad   = 0.0
     throttle    = 0.0
     scan_count  = 0
@@ -426,7 +374,6 @@ def main():
     running = True
     while running:
 
-        # ── events ────────────────────────────────────────────
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
@@ -438,7 +385,6 @@ def main():
                 if ev.key == pygame.K_r:
                     mode = "REVERSE"
 
-        # ── read LiDAR ────────────────────────────────────────
         t0 = time.time()
         if HARDWARE and lidar:
             lidar.read()
@@ -447,7 +393,6 @@ def main():
         else:
             distances, angles_rad = demo_scan()
 
-        # ── safety checks ─────────────────────────────────────
         front_blocked = arc_blocked(
             distances, angles_rad,
             FRONT_CENTER_DEG, FORWARD_ARC_DEG,
@@ -459,7 +404,6 @@ def main():
             UNSAFE_M, BLOCKED_FRAC
         )
 
-        # min distance in each arc
         def arc_min(center_deg, half_deg):
             center_rad = math.radians(center_deg)
             half_rad   = math.radians(half_deg)
@@ -473,13 +417,11 @@ def main():
         min_front = arc_min(FRONT_CENTER_DEG, FORWARD_ARC_DEG)
         min_rear  = arc_min(REAR_CENTER_DEG,  FORWARD_ARC_DEG)
 
-        # ── auto mode switch ──────────────────────────────────
         if mode == "DRIVE" and front_blocked:
             if not rear_blocked:
                 mode = "REVERSE"
                 auto_switch_count += 1
             else:
-                # both blocked — stop
                 throttle  = 0.0
                 steer_rad = 0.0
                 motor_cut = True
@@ -499,7 +441,6 @@ def main():
                 safety_col  = C_UNSAFE
                 gap_result  = None
 
-        # ── gap finding & steering ────────────────────────────
         travel_center = FRONT_CENTER_DEG if mode == "DRIVE" else REAR_CENTER_DEG
         gap_result = find_best_gap(
             distances, angles_rad,
@@ -513,7 +454,6 @@ def main():
                                           -MAX_STEER_RAD, MAX_STEER_RAD))
                 throttle  = DRIVE_THROTTLE if mode == "DRIVE" else REVERSE_THROTTLE
 
-                # current arc min distance
                 cur_min = min_front if mode == "DRIVE" else min_rear
                 if cur_min is None or cur_min > MODERATE_M:
                     safety_str = f"SAFE  {cur_min:.2f}m" if cur_min else "SAFE"
@@ -527,13 +467,11 @@ def main():
                     throttle    = 0.0
                     motor_cut   = True
             else:
-                # no gap at all → slow stop
                 throttle  = 0.0
                 steer_rad = 0.0
                 safety_str = "NO GAP FOUND"
                 safety_col  = C_MOD
 
-        # ── write motor & steering ────────────────────────────
         if HARDWARE and card:
             motor_buf[0] = throttle
             motor_buf[1] = steer_rad
@@ -543,76 +481,58 @@ def main():
             except HILError:
                 pass
 
-        # reset motor_cut for next loop
         motor_cut = False
 
-        # ── FPS ───────────────────────────────────────────────
         now = time.time()
         dt  = now - t_last
         t_last = now
         fps_smooth = fps_smooth * 0.85 + (1.0 / max(dt, 1e-4)) * 0.15
         scan_count += 1
 
-        # ══════════════════════════════════════════════════════
-        #  DRAW
-        # ══════════════════════════════════════════════════════
         screen.fill(C_BG)
 
-        # ── left panel background ─────────────────────────────
         pygame.draw.rect(screen, C_PANEL, (0, 0, RADAR_CX * 2, WIN_H))
         pygame.draw.rect(screen, C_BORDER,(RADAR_CX * 2, 0, 1, WIN_H))
 
-        # ── radar grid ────────────────────────────────────────
         draw_grid(screen, RADAR_CX, RADAR_CY, RADAR_R)
 
-        # ── scan points ───────────────────────────────────────
         draw_radar(screen, distances, angles_rad)
 
-        # ── gap arc ───────────────────────────────────────────
         if gap_result:
             draw_gap_arc(screen, gap_result[0], gap_result[1], travel_center)
 
-        # ── steering arrow ────────────────────────────────────
         draw_steering_arrow(screen, steer_rad, mode)
 
-        # ── car icon ──────────────────────────────────────────
         draw_car(screen, mode)
 
-        # ── right panel ───────────────────────────────────────
         PX = RADAR_CX * 2 + 20
         PY = 20
 
-        # Title
         title = font_xl.render("QCar 2  LIDAR", True, C_ACCENT)
         screen.blit(title, (PX, PY)); PY += 36
         sub = font_hud.render("Heatmap + Steering + Auto-Reverse", True, C_GREY)
         screen.blit(sub, (PX, PY)); PY += 26
         pygame.draw.line(screen, C_BORDER, (PX, PY), (WIN_W - 20, PY)); PY += 12
 
-        # Mode
         mode_col = C_SAFE if mode == "DRIVE" else C_MOD
         PY = stat_block(screen, PX, PY, "MODE",
                         f"{'▲ DRIVE' if mode == 'DRIVE' else '▼ REVERSE'}",
                         mode_col); PY -= 6
 
-        # Safety
         PY = stat_block(screen, PX, PY, "SAFETY STATE", safety_str, safety_col)
 
         pygame.draw.line(screen, C_BORDER, (PX, PY), (WIN_W - 20, PY)); PY += 10
 
-        # Steering
         steer_deg = math.degrees(steer_rad)
         steer_col = C_MOD if abs(steer_deg) > 15 else C_WHITE
         PY = stat_block(screen, PX, PY, "STEER CMD",
                         f"{steer_deg:+.1f} deg  ({steer_rad:+.3f} rad)",
                         steer_col)
 
-        # Steering bar
         hbar(screen, PX, PY, 340, 10,
              (steer_rad + MAX_STEER_RAD) / (2 * MAX_STEER_RAD), steer_col)
         PY += 18
 
-        # Throttle
         thr_col = C_SAFE if throttle > 0 else C_MOD if throttle < 0 else C_GREY
         PY = stat_block(screen, PX, PY, "THROTTLE",
                         f"{throttle:+.3f}", thr_col)
@@ -622,7 +542,6 @@ def main():
 
         pygame.draw.line(screen, C_BORDER, (PX, PY), (WIN_W - 20, PY)); PY += 10
 
-        # Front / rear min distance
         fd_col = (C_UNSAFE if min_front and min_front <= UNSAFE_M
                   else C_MOD if min_front and min_front <= MODERATE_M
                   else C_SAFE)
@@ -635,7 +554,6 @@ def main():
         PY = stat_block(screen, PX, PY, "REAR MIN DIST",
                         f"{min_rear:.3f} m"  if min_rear  else "no data", rd_col)
 
-        # Gap info
         if gap_result:
             PY = stat_block(screen, PX, PY, "BEST GAP WIDTH",
                             f"{gap_result[1]:.1f} deg", C_ACCENT)
@@ -644,7 +562,6 @@ def main():
 
         pygame.draw.line(screen, C_BORDER, (PX, PY), (WIN_W - 20, PY)); PY += 10
 
-        # Scan stats
         PY = stat_block(screen, PX, PY, "SCAN #",
                         f"{scan_count}", C_WHITE)
         PY = stat_block(screen, PX, PY, "FPS",
@@ -654,12 +571,10 @@ def main():
 
         pygame.draw.line(screen, C_BORDER, (PX, PY), (WIN_W - 20, PY)); PY += 10
 
-        # Color scale legend
         lbl = font_sm.render("DISTANCE COLOR SCALE", True, C_GREY)
         screen.blit(lbl, (PX, PY)); PY += 14
         color_scale_bar(screen, PX, PY, 340, 14); PY += 34
 
-        # Key hints
         pygame.draw.line(screen, C_BORDER, (PX, PY), (WIN_W - 20, PY)); PY += 8
         hints = [
             "D = force DRIVE mode",
@@ -671,7 +586,6 @@ def main():
             t = font_sm.render(h, True, C_GREY)
             screen.blit(t, (PX, PY)); PY += 15
 
-        # ── header strip ──────────────────────────────────────
         pygame.draw.rect(screen, C_PANEL,  (0, 0, WIN_W, 30))
         pygame.draw.line(screen, C_BORDER, (0, 30), (WIN_W, 30))
         hdr = font_hud.render(
@@ -681,19 +595,16 @@ def main():
             True, C_GREY
         )
         screen.blit(hdr, (10, 8))
-        # live dot
         dot_col = C_SAFE if HARDWARE else C_MOD
         pygame.draw.circle(screen, dot_col, (WIN_W - 20, 15), 6)
 
         pygame.display.flip()
 
-        # ── pace loop ─────────────────────────────────────────
         elapsed = time.time() - t0
         sleep_t = LOOP_PERIOD - elapsed
         if sleep_t > 0:
             time.sleep(sleep_t)
 
-    # ── shutdown ──────────────────────────────────────────────
     print("\n[shutdown] Stopping ...")
     if HARDWARE:
         if card:

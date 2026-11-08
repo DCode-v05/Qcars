@@ -61,7 +61,7 @@ class SensorManager:
         self._lidar   = None
         H, W = config.CSI_HEIGHT, config.CSI_WIDTH
         self._blank   = np.zeros((H, W, 3), dtype=np.uint8)
-        self._steering_offset = 0.0   # calibration offset (set after open)
+        self._steering_offset = 0.0
 
     @property
     def qcar(self):
@@ -85,7 +85,7 @@ class SensorManager:
         self._open_qcar()
         self._open_realsense()
         self._open_lidar()
-        self._open_cameras()   # cameras last — avoids GStreamer timeout
+        self._open_cameras()
         print("[SensorManager] All sensors open.")
         self._warmup()
 
@@ -93,7 +93,6 @@ class SensorManager:
         print("  Opening QCar (IMU + encoder)...")
         self._qcar = QCar(frequency=self.cfg.QCAR_FREQUENCY,
                           readMode=self.cfg.QCAR_READ_MODE)
-        # Load steering calibration offset if available
         try:
             from pal.products.qcar import QCAR_CONFIG
             self._steering_offset = float(QCAR_CONFIG.get('steeringOffset', 0.0))
@@ -249,8 +248,6 @@ class SensorManager:
                 print(f"  CSI camera close error: {e}")
         print("[SensorManager] All sensors closed.")
 
-
-# ── Standalone test ───────────────────────────────────────────────────────────
 
 def main():
     cfg     = Config()

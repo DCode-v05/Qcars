@@ -63,33 +63,19 @@ from pal.products.qcar    import QCar, QCarLidar, QCarCameras
 from pal.utilities.vision import Camera3D
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  CONFIG
-# ═════════════════════════════════════════════════════════════════════════════
-
 class Config:
 
-    # Loop
     LOOP_RATE_HZ    = 30
-    LOOP_DT         = 1.0 / 30          # 0.0333 s
+    LOOP_DT         = 1.0 / 30
 
-    # QCar — IMU + encoder
-    # frequency must match LOOP_RATE_HZ so HIL task fires at the same rate
-    # readMode=1 → blocking: .read() waits for the next hardware sample
-    # readMode=0 → non-blocking: .read() returns the last sample immediately
     QCAR_FREQUENCY  = 30
-    QCAR_READ_MODE  = 0      # 0=non-blocking (immediate); 1=blocking HW task
+    QCAR_READ_MODE  = 0
 
-    # CSI cameras
-    # cameraId "0" maps to /dev/video0 on the Jetson
-    # Typical layout: "0"=front  "1"=left  "2"=rear  "3"=right
-    # Default Camera2D resolution is 820x410 (Quanser hardware default)
-    CSI_CAMERA_IDS  = ["2"]     # front camera on this QCar is index 2
+    CSI_CAMERA_IDS  = ["2"]
     CSI_WIDTH       = 820
     CSI_HEIGHT      = 410
     CSI_FPS         = 30.0
 
-    # RealSense D435
     RS_WIDTH_RGB    = 640
     RS_HEIGHT_RGB   = 480
     RS_FPS_RGB      = 30.0
@@ -97,21 +83,13 @@ class Config:
     RS_HEIGHT_DEPTH = 480
     RS_FPS_DEPTH    = 30.0
 
-    # LiDAR RPLIDAR A2
-    # rangingDistanceMode: 2=LONG  1=MEDIUM  0=SHORT
-    # interpolationMode:   0=NORMAL (raw uneven angles)
-    #                      1=INTERPOLATED (evenly spaced — switch for Phase 3+)
     LIDAR_NUM_MEAS      = 384
     LIDAR_RANGE_MODE    = 2
     LIDAR_INTERP        = 0
     LIDAR_MIN_M         = 0.10
     LIDAR_MAX_M         = 6.0
-    LIDAR_PASS_THRESHOLD = 100   # ~150 valid in a normal room is healthy
+    LIDAR_PASS_THRESHOLD = 100
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  SENSOR MANAGER
-# ═════════════════════════════════════════════════════════════════════════════
 
 class SensorManager:
     """
@@ -130,21 +108,19 @@ class SensorManager:
 
     def __init__(self, config: Config):
         self.cfg        = config
-        self._qcar      = None      # QCar        — IMU + encoder
-        self._cameras   = None      # QCarCameras instance
-        self._rs        = None      # Camera3D    — RealSense
-        self._lidar     = None      # Lidar       — RPLIDAR A2
+        self._qcar      = None
+        self._cameras   = None
+        self._rs        = None
+        self._lidar     = None
         self._opened    = False
 
-    # ── OPEN ──────────────────────────────────────────────────────────────
 
     def open(self):
         print("\n[SensorManager] Opening sensors...")
         self._open_qcar()
-        self._open_csi_cameras()   # open cameras FIRST — GStreamer pipeline
-        self._open_realsense()     # times out if not read within ~2s of open
+        self._open_csi_cameras()
+        self._open_realsense()
         self._open_lidar()
-        # LiDAR motor needs ~2s to reach operating speed before read() returns valid ranges
         print("  Waiting 2 s for LiDAR motor to reach speed...")
         import time as _t; _t.sleep(2.0)
         self._opened = True
@@ -222,9 +198,6 @@ class SensorManager:
           .angles     (N, 1)  float32  radians  (0 = forward, CCW positive)
         """
         print("  Opening LiDAR (RPLIDAR A2 via QCarLidar)...")
-        # QCarLidar subclasses Lidar and reads the correct ttyTHS port
-        # from QCAR_CONFIG['lidarurl'] — no manual URL needed.
-        # Same .read() / .distances / .angles / .terminate() interface.
         self._lidar = QCarLidar(
             numMeasurements     = self.cfg.LIDAR_NUM_MEAS,
             rangingDistanceMode = self.cfg.LIDAR_RANGE_MODE,
@@ -232,7 +205,6 @@ class SensorManager:
         )
         print(f"  LiDAR: OK  ({self.cfg.LIDAR_NUM_MEAS} measurements/scan)")
 
-    # ── READ ──────────────────────────────────────────────────────────────
 
     def read(self) -> dict:
         """
@@ -326,11 +298,11 @@ class SensorManager:
         elif is_black:
             print(f"  [WARN] CSI front camera: frame is black (max={frame.max()}) — check cable/lens cap")
         else:
-            pass  # Normal operation — no print to keep terminal clean
+            pass
 
         return {
             'front': frame,
-            '2':     frame,   # alias so perceiver.py/obstacle_detector.py work unchanged
+            '2':     frame,
         }
     def _read_realsense(self) -> dict:
         """
@@ -370,7 +342,6 @@ class SensorManager:
 
         return {'distances': distances, 'angles': angles, 'valid': valid, 'new_scan': bool(flag)}
 
-    # ── CLOSE ─────────────────────────────────────────────────────────────
 
     def close(self):
         """Close all sensors. Always call from a finally block."""
@@ -400,10 +371,6 @@ class SensorManager:
         self._opened = False
         print("[SensorManager] All sensors closed.")
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  DIAGNOSTIC PRINTER
-# ═════════════════════════════════════════════════════════════════════════════
 
 def print_sensor_summary(data: dict, elapsed: float):
     accel = data['accelerometer']
@@ -525,10 +492,6 @@ def print_final_report(all_data: list, cfg: Config):
     print(sep + "\n")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ═════════════════════════════════════════════════════════════════════════════
-
 def main():
     cfg     = Config()
     sensors = SensorManager(cfg)
@@ -557,7 +520,6 @@ def main():
 
             data = sensors.read()
 
-            # Deep-copy: buffers are reused each tick, copies preserve history
             snapshot = {}
             for k, v in data.items():
                 if isinstance(v, np.ndarray):
@@ -572,7 +534,6 @@ def main():
                 print_sensor_summary(data, elapsed)
                 last_print = elapsed
 
-            # Soft real-time: sleep the remainder of the tick period
             elapsed_tick = time.perf_counter() - tick_start
             sleep_time   = cfg.LOOP_DT - elapsed_tick
             if sleep_time > 0:

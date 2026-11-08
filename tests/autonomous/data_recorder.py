@@ -33,7 +33,7 @@ import numpy as np
 import config as cfg
 
 
-CAM_NAMES = ["right", "back", "front", "left"]  # matches CAMERA_CONFIG order
+CAM_NAMES = ["right", "back", "front", "left"]
 
 
 class DataRecorder:
@@ -49,7 +49,6 @@ class DataRecorder:
         self._depth_dir = os.path.join(self._dir, "realsense_depth")
         os.makedirs(self._depth_dir, exist_ok=True)
 
-        # Video writers for CSI cameras
         self._csi_writers = []
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
         for name in CAM_NAMES:
@@ -58,12 +57,10 @@ class DataRecorder:
                                 (cfg.CSI_WIDTH, cfg.CSI_HEIGHT))
             self._csi_writers.append(w)
 
-        # RealSense RGB video
         self._rs_writer = cv2.VideoWriter(
             os.path.join(self._dir, "realsense_rgb.avi"),
             fourcc, cfg.RS_FPS, (cfg.RS_WIDTH, cfg.RS_HEIGHT))
 
-        # CSV files
         self._lidar_file = open(os.path.join(self._dir, "lidar.csv"), 'w',
                                 newline='')
         self._lidar_csv = csv.writer(self._lidar_file)
@@ -107,25 +104,21 @@ class DataRecorder:
             ts = sensor_data.get('timestamp', time.time())
             self._frame_count += 1
 
-            # ── CSI camera frames → video ──
             csi_frames = sensor_data.get('csi_frames', [])
             for i, frame in enumerate(csi_frames):
                 if i < len(self._csi_writers) and frame is not None:
                     self._csi_writers[i].write(frame)
 
-            # ── RealSense RGB → video ──
             rs_rgb = sensor_data.get('rs_rgb')
             if rs_rgb is not None:
                 self._rs_writer.write(rs_rgb)
 
-            # ── RealSense depth → .npy (every 5th frame to save space) ──
             if self._frame_count % 5 == 0:
                 rs_depth = sensor_data.get('rs_depth_m')
                 if rs_depth is not None:
                     fname = f"depth_{self._frame_count:06d}.npy"
                     np.save(os.path.join(self._depth_dir, fname), rs_depth)
 
-            # ── LiDAR → CSV ──
             distances = sensor_data.get('lidar_distances', np.array([]))
             angles = sensor_data.get('lidar_angles', np.array([]))
             if len(distances) > 0:
@@ -135,7 +128,6 @@ class DataRecorder:
                     f'{ts:.6f}', len(distances), dist_str, ang_str
                 ])
 
-            # ── IMU → CSV ──
             accel = sensor_data.get('accelerometer', np.zeros(3))
             gyro = sensor_data.get('gyroscope', np.zeros(3))
             self._imu_csv.writerow([
@@ -144,7 +136,6 @@ class DataRecorder:
                 f'{gyro[0]:.6f}', f'{gyro[1]:.6f}', f'{gyro[2]:.6f}',
             ])
 
-            # ── Wheels → CSV ──
             motor_speed = sensor_data.get('motor_speed', 0.0)
             battery = sensor_data.get('battery_voltage', 0.0)
             self._wheels_csv.writerow([
@@ -153,7 +144,6 @@ class DataRecorder:
                 f'{throttle_cmd:.4f}', f'{steering_cmd:.4f}',
             ])
 
-            # ── Navigation state → CSV ──
             if detection and nav_result:
                 px = pose[0] if pose else 0.0
                 py = pose[1] if pose else 0.0

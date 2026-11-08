@@ -3,11 +3,7 @@ import time
 from hal.utilities.image_processing import ImageProcessing
 from pal.products.qcar import QCar
 
-# ─── SET YOUR BIAS VALUE HERE ───────────────────────────────────────────────
-# Wheel shifted RIGHT → use a NEGATIVE value (e.g., -0.03 to -0.09)
-# Wheel shifted LEFT  → use a POSITIVE value (e.g., +0.03 to +0.09)
-STEER_BIAS = -0.04   # radians — adjust this value
-# ─────────────────────────────────────────────────────────────────────────────
+STEER_BIAS = -0.04
 
 myCar = QCar()
 
@@ -17,9 +13,8 @@ try:
 
     start = time.time()
     while time.time() - start < 3.0:
-        # Apply zero steering + bias correction
         steering = 0.0 + STEER_BIAS
-        throttle = 0.05  # slow forward motion to observe behavior
+        throttle = 0.05
 
         myCar.read_write_std(throttle=throttle, steering=steering)
         time.sleep(0.01)

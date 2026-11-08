@@ -4,18 +4,14 @@ import cv2
 from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
 from quanser.multimedia.exceptions import MediaError
 
-# ── Config ────────────────────────────────────────────────────
 FRAME_WIDTH  = 820
 FRAME_HEIGHT = 410
 FRAME_RATE   = 120.0
-# ─────────────────────────────────────────────────────────────
 
-# Ask user
 sensor_id = input("Enter sensor ID (0 / 1 / 2 / 3): ").strip()
 url = f"video://localhost:{sensor_id}"
 print(f"Opening {url} ... Press 'q' to quit.")
 
-# Buffer — shape (H, W, 3) for ROW_MAJOR_INTERLEAVED_BGR
 image_data = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
 
 capture = VideoCapture()

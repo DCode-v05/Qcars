@@ -28,7 +28,6 @@ NUM_MEASUREMENTS = 384
 RANGING_MODE     = 2
 INTERP_MODE      = 0
 
-# ── ASCII sector rose ─────────────────────────────────────────
 def ascii_rose(distances, angles_rad, n_sectors=16):
     sector_size = 2 * np.pi / n_sectors
     sector_min  = [None] * n_sectors

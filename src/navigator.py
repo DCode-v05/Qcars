@@ -8,15 +8,13 @@ from pal.utilities.math import wrap_to_pi
 
 
 class NavigatorConfig:
-    GOAL_DISTANCE_M  = 2.0    # metres forward from start
-    GOAL_RADIUS_M    = 0.15   # within this = ARRIVED
-    # PID for heading correction
+    GOAL_DISTANCE_M  = 2.0
+    GOAL_RADIUS_M    = 0.15
     K_HEADING_P      = 1.2
     K_HEADING_I      = 0.0
     K_HEADING_D      = 0.05
-    MAX_STEERING_RAD = np.pi / 6   # ±30°
-    # Smooth recovery: limit steering rate to avoid jerky transitions
-    MAX_STEER_RATE   = np.pi / 3   # rad/s  —  max steering change per second
+    MAX_STEERING_RAD = np.pi / 6
+    MAX_STEER_RATE   = np.pi / 3
 
 
 class Navigator:
@@ -38,9 +36,9 @@ class Navigator:
         self.cfg         = config
         self._goal_x     = 0.0
         self._goal_y     = 0.0
-        self._ei         = 0.0   # heading error integral
+        self._ei         = 0.0
         self._prev_e     = None
-        self._prev_steer = 0.0   # for rate-limiting
+        self._prev_steer = 0.0
 
     def reset(self, initial_pose: np.ndarray):
         """
@@ -67,12 +65,10 @@ class Navigator:
         """
         x, y, theta = float(pose[0]), float(pose[1]), float(pose[2])
 
-        # Vector to goal
         dx = self._goal_x - x
         dy = self._goal_y - y
         dist = float(np.sqrt(dx**2 + dy**2))
 
-        # Arrived check
         if dist <= self.cfg.GOAL_RADIUS_M:
             return {
                 'distance_remaining': dist,
@@ -83,11 +79,9 @@ class Navigator:
                 'goal_y':             self._goal_y,
             }
 
-        # Desired heading toward goal
         desired_heading = float(np.arctan2(dy, dx))
         heading_error   = float(wrap_to_pi(desired_heading - theta))
 
-        # PD controller for steering
         if dt > 0:
             self._ei += heading_error * dt
         de = 0.0
@@ -102,7 +96,6 @@ class Navigator:
                                  -self.cfg.MAX_STEERING_RAD,
                                   self.cfg.MAX_STEERING_RAD))
 
-        # Rate-limit steering to prevent jerky transitions after avoidance
         if dt > 0.001:
             max_delta = self.cfg.MAX_STEER_RATE * dt
             delta = steering - self._prev_steer

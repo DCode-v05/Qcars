@@ -34,29 +34,23 @@ class ObstacleDetector:
         valid     = sensor_data['lidar_valid']
         depth_m   = sensor_data.get('rs_depth_m')
 
-        # 1. Build VFH histogram from LiDAR
         self._build_histogram(distances, angles, valid)
 
-        # 2. Inject RealSense depth obstacles (catches low objects)
         if depth_m is not None:
             self._inject_depth(depth_m)
 
-        # 3. Inject YOLO detections
         if yolo_dets:
             self._inject_yolo(yolo_dets, distances, angles, valid)
 
-        # 4. Sector analysis
         front_dist = self._sector_min_hist(0.0, cfg.FRONT_SECTOR_DEG)
         rear_dist  = self._sector_min_hist(np.pi, cfg.REAR_SECTOR_DEG)
         left_dist  = self._sector_min_hist(np.pi * 1.5, cfg.SIDE_SECTOR_DEG)
         right_dist = self._sector_min_hist(np.pi * 0.5, cfg.SIDE_SECTOR_DEG)
 
-        # Smooth forward distance
         if front_dist < cfg.LIDAR_MAX_M:
             self._front_history.append(front_dist)
         smoothed = float(np.mean(self._front_history)) if self._front_history else front_dist
 
-        # 5. Zone (informational only — does NOT cause stopping)
         if smoothed > cfg.ZONE_CLEAR_M:
             zone = 'CLEAR'
         elif smoothed > cfg.ZONE_WARN_M:
@@ -64,7 +58,6 @@ class ObstacleDetector:
         else:
             zone = 'STOP'
 
-        # 6. DWA trajectory planning — replaces VFH gap-finding
         dwa_result = self._dwa.plan(
             histogram=self._histogram,
             current_steering=self._last_steering,
@@ -77,12 +70,10 @@ class ObstacleDetector:
         gap_depth     = dwa_result['gap_depth']
         self._last_steering = path_steer
 
-        # 7. YOLO classification — only when obstacle within 0.2m
         obstacle_type = 'NONE'
         if yolo_dets and smoothed < cfg.YOLO_AFFECT_DIST_M:
             obstacle_type = self._classify_yolo(yolo_dets, distances, angles, valid)
 
-        # 8. Behaviour
         if obstacle_type == 'PERSON' and smoothed < cfg.YOLO_AFFECT_DIST_M:
             behaviour = 'SLOW'
         elif zone == 'STOP':
@@ -92,7 +83,6 @@ class ObstacleDetector:
         else:
             behaviour = 'NAVIGATE'
 
-        # Avoid side (for LED indicators)
         norm_angle = path_angle
         if norm_angle > np.pi:
             norm_angle -= 2 * np.pi
@@ -115,9 +105,6 @@ class ObstacleDetector:
             'avoid_side':      avoid_side,
         }
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  HISTOGRAM — distance-weighted, inflated by car width
-    # ══════════════════════════════════════════════════════════════════════════
 
     def _build_histogram(self, distances, angles, valid):
         self._histogram[:] = cfg.VFH_PLAN_RANGE_M
@@ -136,7 +123,6 @@ class ObstacleDetector:
             a = angles[i] % (2 * np.pi)
             centre_bin = int(a / (2 * np.pi) * n_bins) % n_bins
 
-            # Inflate minimally — DWA trajectory sim handles car width
             if d > 0.05:
                 inflate_rad = math.atan(cfg.OBSTACLE_INFLATE_M / d)
                 inflate_bins = max(1, int(math.ceil(
@@ -161,9 +147,6 @@ class ObstacleDetector:
                 min_d = self._histogram[b]
         return min_d
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  REALSENSE DEPTH — catches low obstacles LiDAR misses
-    # ══════════════════════════════════════════════════════════════════════════
 
     def _inject_depth(self, depth_m):
         """RealSense depth injection — DISABLED.
@@ -175,7 +158,7 @@ class ObstacleDetector:
         RealSense depth can be re-enabled later with proper ground-plane
         filtering (RANSAC or row-based height thresholding).
         """
-        return  # DISABLED — floor plane was poisoning the histogram
+        return
 
         if depth_m is None or depth_m.size == 0:
             return
@@ -218,9 +201,6 @@ class ObstacleDetector:
                         if min_depth < self._histogram[bb]:
                             self._histogram[bb] = min_depth
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  YOLO INJECTION
-    # ══════════════════════════════════════════════════════════════════════════
 
     def _inject_yolo(self, yolo_dets, distances, angles, valid):
         n_bins = cfg.VFH_NUM_BINS
@@ -237,7 +217,6 @@ class ObstacleDetector:
                 diff = abs(a - det_angle_rad)
                 if diff > np.pi:
                     diff = 2 * np.pi - diff
-                # YOLO only affects path when object within 0.2m
                 if diff <= hw and distances[i] <= cfg.YOLO_AFFECT_DIST_M:
                     if lidar_dist is None or distances[i] < lidar_dist:
                         lidar_dist = float(distances[i])
@@ -260,9 +239,6 @@ class ObstacleDetector:
                     break
                 b = (b + 1) % n_bins
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  YOLO CLASSIFICATION
-    # ══════════════════════════════════════════════════════════════════════════
 
     def _classify_yolo(self, yolo_dets, distances, angles, valid):
         has_person = False

@@ -7,12 +7,10 @@ import sys
 import time
 import numpy as np
 
-# Add Quanser libraries to path
 sys.path.insert(0, '/home/nvidia/Documents/Quanser/libraries/python')
 
 from pal.utilities.lidar import Lidar
 
-# ── QCar 2 CONFIG (confirmed) ─────────────────────────────────────────────────
 NUM_MEASUREMENTS = 384
 NUM_SCANS        = 10
 
@@ -22,8 +20,6 @@ print("  Port: localhost:1 | Baud: 256000 | RPLidar")
 print("=" * 55)
 
 try:
-    # Patch the URL for QCar 2 BEFORE Lidar.__init__ opens the device
-    # We subclass just enough to override the url attribute
     class QCar2Lidar(Lidar):
         url = ("serial-cpu://localhost:1?baud='256000',"
                "word='8',parity='none',stop='1',flow='none',dsr='on'")
@@ -31,8 +27,8 @@ try:
     with QCar2Lidar(
         type='RPLidar',
         numMeasurements=NUM_MEASUREMENTS,
-        rangingDistanceMode=2,   # LONG
-        interpolationMode=0      # NORMAL
+        rangingDistanceMode=2,
+        interpolationMode=0
     ) as lidar:
 
         print("\n[OK]  LIDAR opened on localhost:1 @ 256000 baud")

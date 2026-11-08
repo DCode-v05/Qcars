@@ -32,9 +32,6 @@ from quanser.hardware import HIL, EncoderQuadratureMode
 from quanser.hardware.exceptions import HILError
 from pal.products.qcar import QCarLidar
 
-# ══════════════════════════════════════════════════════════════
-# Channel Map  (verified from rot.py)
-# ══════════════════════════════════════════════════════════════
 CARD_TYPE         = "qcar2"
 CARD_ID           = "0"
 THROTTLE_CH       = 11000
@@ -44,50 +41,28 @@ ENCODER_CH        = 0
 MOTOR_CHANNELS    = np.array([THROTTLE_CH, STEERING_CH], dtype=np.uint32)
 ENC_CHANNELS      = np.array([ENCODER_CH],               dtype=np.uint32)
 
-# ══════════════════════════════════════════════════════════════
-# LiDAR Config
-# ══════════════════════════════════════════════════════════════
 NUM_MEASUREMENTS  = 384
-RANGING_MODE      = 2       # LONG range
+RANGING_MODE      = 2
 INTERP_MODE       = 0
 
-# ══════════════════════════════════════════════════════════════
-# CALIBRATION  <-- only value you need to change
-# ──────────────────────────────────────────────────────────────
-# Step 1: python3 lidar_diag.py  (place object ~0.4m at QCar nose)
-# Step 2: note the "CLOSEST POINT" angle printed each scan
-# Step 3: paste that angle into FRONT_CENTER_DEG below
-# REAR_CENTER_DEG is auto-computed as FRONT + 180 deg
-# ══════════════════════════════════════════════════════════════
-FRONT_CENTER_DEG  = 180.0     # <-- paste value from lidar_diag.py here
+FRONT_CENTER_DEG  = 180.0
 REAR_CENTER_DEG   = (FRONT_CENTER_DEG + 180.0) % 360.0
-ARC_HALF_DEG      = 30.0    # half-width of detection cone (deg)
+ARC_HALF_DEG      = 30.0
 
-# ══════════════════════════════════════════════════════════════
-# Safety Thresholds
-# ══════════════════════════════════════════════════════════════
 UNSAFE_M          = 0.50
 MODERATE_M        = 1.00
 
-# ══════════════════════════════════════════════════════════════
-# Motor
-# ══════════════════════════════════════════════════════════════
 DRIVE_THROTTLE    =  0.12
 REVERSE_THROTTLE  = -0.12
 STEERING_ANGLE    =  0.0
 
-# ══════════════════════════════════════════════════════════════
-# Loop timing
-# ══════════════════════════════════════════════════════════════
 LOOP_HZ           = 10
 LOOP_PERIOD       = 1.0 / LOOP_HZ
 
-# Encoder math (from rot.py)
 COUNTS_PER_REV_X4 = 720 * 4
 WHEEL_CIRCUM_M    = 2 * np.pi * 0.0328
 METRES_PER_COUNT  = WHEEL_CIRCUM_M / COUNTS_PER_REV_X4
 
-# ── ANSI colours ──────────────────────────────────────────────
 RED    = "\033[91m"
 YELLOW = "\033[93m"
 GREEN  = "\033[92m"
@@ -99,9 +74,6 @@ BOLD   = "\033[1m"
 CLEAR  = "\033[2K\r"
 
 
-# ══════════════════════════════════════════════════════════════
-# Arc distance — wrap-safe
-# ══════════════════════════════════════════════════════════════
 def arc_min_distance(distances, angles_rad, center_deg, half_deg):
     """
     Minimum valid distance within a directional cone.
@@ -126,9 +98,6 @@ def arc_min_distance(distances, angles_rad, center_deg, half_deg):
     return float(distances[valid].min())
 
 
-# ══════════════════════════════════════════════════════════════
-# Safety classifier
-# ══════════════════════════════════════════════════════════════
 def safety_state(min_dist):
     """Returns (label, colour, motor_allowed)."""
     if min_dist is None:
@@ -140,9 +109,6 @@ def safety_state(min_dist):
     return     f"SAFE     ({min_dist:.3f} m)             ", GREEN,  True
 
 
-# ══════════════════════════════════════════════════════════════
-# UI
-# ══════════════════════════════════════════════════════════════
 def print_header(mode):
     os.system('clear')
     print(f"{BOLD}{CYAN}{'━'*68}{RESET}")
@@ -175,9 +141,6 @@ def get_mode():
         print(f"  {RED}Invalid. Type 'drive' or 'reverse'.{RESET}")
 
 
-# ══════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════
 def main():
 
     mode         = get_mode()
@@ -191,7 +154,6 @@ def main():
         print("Aborted.")
         return
 
-    # Open HIL
     print("\n[1/3] Opening HIL board ...")
     try:
         card = HIL(CARD_TYPE, CARD_ID)
@@ -200,7 +162,6 @@ def main():
         print(f"      FAIL  {e.get_error_message()}")
         return
 
-    # Encoder
     print("[2/3] Configuring encoder ...")
     enc_buf  = np.zeros(1, dtype=np.int32)
     enc_mode = np.array([EncoderQuadratureMode.X4], dtype=np.int32)
@@ -208,7 +169,6 @@ def main():
     card.set_encoder_counts(ENC_CHANNELS, 1, np.zeros(1, dtype=np.int32))
     print("      OK  X4 quadrature, counter zeroed")
 
-    # LiDAR
     print("[3/3] Starting LiDAR ...")
     lidar = QCarLidar(
         numMeasurements=NUM_MEASUREMENTS,
@@ -219,7 +179,6 @@ def main():
     time.sleep(2.0)
     print("      OK  LiDAR ready")
 
-    # Zero motor
     motor_buf = np.array([0.0, STEERING_ANGLE], dtype=np.float64)
     card.write_other(MOTOR_CHANNELS, 2, motor_buf)
 
@@ -233,18 +192,15 @@ def main():
         while True:
             t0 = time.time()
 
-            # Read LiDAR
             lidar.read()
             dists  = lidar.distances.flatten()
             angles = lidar.angles.flatten()
 
-            # Check only the arc in the direction of travel
             min_dist = arc_min_distance(
                 dists, angles, arc_center, ARC_HALF_DEG
             )
             state_str, colour, motor_ok = safety_state(min_dist)
 
-            # Motor decision
             if motor_ok:
                 motor_buf[0] = throttle_cmd
             else:
@@ -254,10 +210,8 @@ def main():
             motor_buf[1] = STEERING_ANGLE
             card.write_other(MOTOR_CHANNELS, 2, motor_buf)
 
-            # Encoder
             card.read_encoder(ENC_CHANNELS, 1, enc_buf)
 
-            # Print one updating line
             elapsed  = time.time() - start_time
             dist_str = f"{min_dist:.3f} m" if min_dist is not None else "  no data"
             motor_str = f"{GREEN}RUN{RESET}" if motor_ok else f"{RED}CUT{RESET}"

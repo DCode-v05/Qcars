@@ -1,6 +1,3 @@
-# Quanser QCar2 - LiDAR Web Visualization
-# Run on QCar, view in browser on your PC
-
 import sys
 sys.path.insert(0, '/home/nvidia/Documents/Quanser/libraries/python')
 
@@ -10,18 +7,15 @@ import numpy as np
 from flask import Flask, render_template_string
 from pal.products.qcar import QCarLidar
 
-# --- LiDAR setup (official Quanser settings) ---
 myLidar = QCarLidar(
     numMeasurements=1000,
     rangingDistanceMode=2,
     interpolationMode=0
 )
 
-# Shared data
 lidar_data = {"angles": [], "distances": []}
 lock = threading.Lock()
 
-# --- Background thread: keep reading LiDAR ---
 def lidar_loop():
     while True:
         myLidar.read()
@@ -34,7 +28,6 @@ def lidar_loop():
 
 threading.Thread(target=lidar_loop, daemon=True).start()
 
-# --- Flask web server ---
 app = Flask(__name__)
 
 HTML = """

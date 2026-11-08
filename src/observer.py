@@ -43,19 +43,11 @@ from state_machine    import StateMachine, StateMachineConfig
 from dashboard        import Dashboard
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  MISSION PARAMETERS  —  edit here before each run
-# ═════════════════════════════════════════════════════════════════════════════
-
-GOAL_DISTANCE_M  = 15.0    # metres — large enough for 30s of autonomous driving
-MAX_THROTTLE     = 0.10    # safety ceiling — increase only after testing
+GOAL_DISTANCE_M  = 15.0
+MAX_THROTTLE     = 0.10
 DASHBOARD_PORT   = 5000
-RUN_TIMEOUT_S    = 35.0    # hard timeout — car runs for ~30s then stops safely
+RUN_TIMEOUT_S    = 35.0
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  SIGNAL HANDLER
-# ═════════════════════════════════════════════════════════════════════════════
 
 _shutdown_requested = False
 
@@ -66,10 +58,6 @@ def _signal_handler(signum, frame):
     print(f"\n[observer] Received {sig_name} — shutting down...")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ═════════════════════════════════════════════════════════════════════════════
-
 def main():
     global _shutdown_requested
 
@@ -79,7 +67,6 @@ def main():
     except (OSError, AttributeError):
         pass
 
-    # ── Build all modules ─────────────────────────────────────────────────
     p_cfg  = PerceptionConfig()
     e_cfg  = EstimationConfig()
     pc_cfg = PerceiverConfig()
@@ -106,11 +93,9 @@ def main():
     print("  Ctrl+C to stop at any time.")
     print("═" * 62)
 
-    # ── Open hardware ─────────────────────────────────────────────────────
     sensors.open()
     perceiver.open()
 
-    # Pre-warm YOLO: forces TensorRT engine load NOW, not during driving
     first_data = sensors.read()
     perceiver.warmup(
         bgr_frame=first_data['csi_front'],
@@ -121,11 +106,9 @@ def main():
     estimator.reset()
     sm.reset()
 
-    # Set navigator goal from initial pose
     first_pose = estimator.update(first_data, dt=0.033)
     navigator.reset(first_pose)
 
-    # ── Timing ────────────────────────────────────────────────────────────
     start_t     = time.perf_counter()
     last_t      = start_t
     last_print  = 0.0
@@ -145,11 +128,9 @@ def main():
                 print(f"\n[observer] Timeout after {elapsed:.1f}s.")
                 break
 
-            # ── 1. Read sensors ───────────────────────────────────────────
             data = sensors.read()
             tick_count += 1
 
-            # ── 2. Compute dt ─────────────────────────────────────────────
             now = time.perf_counter()
             dt  = max(now - last_t, 1e-4)
             last_t = now
@@ -159,26 +140,19 @@ def main():
             if data['lidar_new_scan']:
                 lidar_ticks += 1
 
-            # ── 3. Pose estimation (single call: encoder + gyro) ──────────
             pose = estimator.update(data, dt)
 
-            # ── 4. Compute heading to goal (for path planner bias) ───────
             dx = navigator._goal_x - pose[0]
             dy = navigator._goal_y - pose[1]
             goal_heading_world = float(np.arctan2(dy, dx))
-            # Convert to body frame: how far the goal is from where we're facing
             goal_heading_body = goal_heading_world - pose[2]
-            # Normalize to [0, 2π] for the LiDAR angle convention
             goal_heading_lidar = goal_heading_body % (2 * np.pi)
             detector.set_goal_heading(goal_heading_lidar)
 
-            # ── 5. Obstacle detection (LiDAR + YOLO + depth + path plan) ─
             detection = detector.detect(data)
 
-            # ── 6. Navigation ─────────────────────────────────────────────
             nav_result = navigator.update(pose, dt)
 
-            # ── 7. State machine ──────────────────────────────────────────
             sm_result = sm.update(detection, nav_result, data, dt)
             throttle  = sm_result['throttle']
             steering  = sm_result['steering']
@@ -188,13 +162,10 @@ def main():
                 print(f"\n[observer] Battery critical — stopping.")
                 break
 
-            # ── 7. Lights ─────────────────────────────────────────────────
             leds = lights.get_leds(sm_state, detection['avoid_side'])
 
-            # ── 8. Send to hardware ───────────────────────────────────────
             sensors.write_command(throttle=throttle, steering=steering, leds=leds)
 
-            # ── 9. Dashboard (instant — rendering is in background) ───────
             avg_dt_ms = (dt_sum / max(dt_count, 1)) * 1000.0
             lidar_hz  = lidar_ticks / max(elapsed, 1.0)
             timing = {
@@ -215,7 +186,6 @@ def main():
                 heading_err = nav_result['heading_error'],
             )
 
-            # ── 10. Terminal print every 0.5s ─────────────────────────────
             if elapsed - last_print >= 0.5:
                 x, y, theta = pose
                 dist_rem    = nav_result['distance_remaining']
@@ -240,14 +210,12 @@ def main():
                 )
                 last_print = elapsed
 
-            # ── Check ARRIVED ─────────────────────────────────────────────
             if sm_state == 'ARRIVED':
                 print(f"\n[observer] ARRIVED at {elapsed:.1f}s.  "
                       f"x={pose[0]:+.3f}m  y={pose[1]:+.3f}m")
                 time.sleep(1.0)
                 break
 
-            # ── Soft real-time pacing ─────────────────────────────────────
             tick_elapsed = time.perf_counter() - tick_start
             sleep_time   = p_cfg.LOOP_DT - tick_elapsed
             if sleep_time > 0:

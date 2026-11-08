@@ -43,84 +43,57 @@ try:
 except ImportError:
     HARDWARE = False
 
-# ══════════════════════════════════════════════════════════════
-#  CALIBRATE — paste from lidar_diag.py
-# ══════════════════════════════════════════════════════════════
 FRONT_DEG   = 180.0
 REAR_DEG    = (FRONT_DEG + 180.0) % 360.0
 
-# ══════════════════════════════════════════════════════════════
-#  LIDAR
-# ══════════════════════════════════════════════════════════════
-RANGING_MODE    = 0      # SHORT — best for closed room < 3m
+RANGING_MODE    = 0
 NUM_MEAS        = 384
 LOOP_HZ         = 10
 LOOP_T          = 1.0 / LOOP_HZ
 
-# ══════════════════════════════════════════════════════════════
-#  VFH+ PARAMETERS
-# ══════════════════════════════════════════════════════════════
-ALPHA           = 5              # sector width degrees → 72 sectors
-N_SEC           = 360 // ALPHA   # 72
-DIST_INFL       = 2.0            # obstacle influence radius (m)
-ROBOT_R         = 0.22           # robot half-width for inflation
-SAFE_D          = 0.08           # extra safety margin
-SMOOTH_L        = 3              # smoothing window (sectors each side)
-H_THRESH        = 0.55           # binary threshold (lower=more cautious)
-H_HYST          = 0.12           # hysteresis band
-MIN_VALLEY_SEC  = 2              # min free sectors for valid valley (2×5°=10°)
-COST_W_FORWARD  = 4.0            # weight: gap vs forward dir
-COST_W_PREV     = 3.0            # weight: gap vs previous steer
-COST_W_CONT     = 2.0            # weight: gap vs current heading
+ALPHA           = 5
+N_SEC           = 360 // ALPHA
+DIST_INFL       = 2.0
+ROBOT_R         = 0.22
+SAFE_D          = 0.08
+SMOOTH_L        = 3
+H_THRESH        = 0.55
+H_HYST          = 0.12
+MIN_VALLEY_SEC  = 2
+COST_W_FORWARD  = 4.0
+COST_W_PREV     = 3.0
+COST_W_CONT     = 2.0
 
-# ══════════════════════════════════════════════════════════════
-#  FGM PARAMETERS (Follow the Gap Method fallback)
-# ══════════════════════════════════════════════════════════════
-FGM_MIN_GAP_M   = 0.45           # min distance jump to count as gap edge
-FGM_ROBOT_D     = 0.40           # robot diameter for gap passability check
-FGM_ALPHA       = 0.85           # blend: 1.0=pure gap centre, 0=forward bias
+FGM_MIN_GAP_M   = 0.45
+FGM_ROBOT_D     = 0.40
+FGM_ALPHA       = 0.85
 
-# ══════════════════════════════════════════════════════════════
-#  STATE MACHINE
-# ══════════════════════════════════════════════════════════════
-# DRIVE → REVERSE trigger: fraction of FRONT_CHECK_DEG blocked
-FRONT_CHECK_DEG = 70             # cone to check for forward block
-BLOCKED_FRAC    = 0.78           # fraction needed to trigger mode flip
-CONFIRM_FRAMES  = 2              # consecutive frames needed to confirm block
+FRONT_CHECK_DEG = 70
+BLOCKED_FRAC    = 0.78
+CONFIRM_FRAMES  = 2
 
-# ESCAPE trigger: no gap found for this long
 ESCAPE_TRIGGER_S = 0.5
-ESCAPE_STEER     = 0.40          # hard steer during escape
-ESCAPE_THROTTLE  = 0.06          # very slow creep during escape
-ESCAPE_MAX_S     = 2.5           # max escape duration before trying reverse
+ESCAPE_STEER     = 0.40
+ESCAPE_THROTTLE  = 0.06
+ESCAPE_MAX_S     = 2.5
 
-# Hard stop distance — truly blocked in all directions
 ESTOP_M          = 0.20
 
-# ══════════════════════════════════════════════════════════════
-#  THROTTLE — adaptive
-# ══════════════════════════════════════════════════════════════
 MAX_THR         = 0.18
 MIN_THR         = 0.07
 THR_STEP        = 0.02
-SLOW_NEAR_M     = 0.80           # start slowing below this
+SLOW_NEAR_M     = 0.80
 STOP_NEAR_M     = ESTOP_M
-SLOW_STEER_DEG  = 18             # slow on steer > this
-STEER_SMOOTH    = 0.40           # IIR steer smoother
+SLOW_STEER_DEG  = 18
+STEER_SMOOTH    = 0.40
 
-# ══════════════════════════════════════════════════════════════
-#  HARDWARE
-# ══════════════════════════════════════════════════════════════
 CARD_TYPE   = "qcar2"
 CARD_ID     = "0"
 MOTOR_CH    = np.array([11000, 1000], dtype=np.uint32)
 ENC_CH      = np.array([0],          dtype=np.uint32)
 MAX_STEER   = 0.40
-MPC         = (2*math.pi*0.0328)/(720*4)   # metres per encoder count
+MPC         = (2*math.pi*0.0328)/(720*4)
 
-# ══════════════════════════════════════════════════════════════
-#  TERMINAL CANVAS
-# ══════════════════════════════════════════════════════════════
 CC, CR  = 74, 38
 PC, PR  = CC, CR*2
 CX, CY  = PC//2, PR//2
@@ -292,7 +265,6 @@ def panel_lines(mode,state,algo,status,steer,thr,min_d,
     bv=f"w={best_v[3]*ALPHA}° c={best_v[2]*ALPHA}°" if best_v else "none"
     sym="▲ DRIVE  " if mode=="DRIVE" else "▼ REVERSE"
 
-    # mini histogram bar (N_SEC→22 chars)
     bw=N_SEC//22; hbar=""
     mx=max(hist_sm.max(),1e-6)
     for i in range(22):
@@ -356,14 +328,11 @@ def panel_lines(mode,state,algo,status,steer,thr,min_d,
     ]
 
 
-# ══════════════════════════════════════════════════════════════
-#  VFH+  (fixed: full 360°, no direction bias in histogram)
-# ══════════════════════════════════════════════════════════════
 class VFHPlus:
     def __init__(self):
         self.hist    = np.zeros(N_SEC)
         self.hist_sm = np.zeros(N_SEC)
-        self.binary  = np.ones(N_SEC,dtype=bool)   # start all free
+        self.binary  = np.ones(N_SEC,dtype=bool)
         self.prev_st = 0.0
 
     def build(self, dists, angs):
@@ -373,14 +342,12 @@ class VFHPlus:
             d=float(dists[i])
             if d<0.03 or d>DIST_INFL: continue
             mag=(a-b*d)**2
-            # full 360° — no front bias in histogram build
             deg=(math.degrees(float(angs[i]))-FRONT_DEG)%360.
             sec=int(deg/ALPHA)%N_SEC
             spread=max(1,int(math.degrees(
                 math.asin(min(1.,(ROBOT_R+SAFE_D)/max(d,.01))))/ALPHA))
             for ds in range(-spread,spread+1):
                 self.hist[(sec+ds)%N_SEC]+=mag
-        # smooth
         l=SMOOTH_L
         for k in range(N_SEC):
             self.hist_sm[k]=sum(self.hist[(k+s)%N_SEC]
@@ -391,7 +358,6 @@ class VFHPlus:
         for k in range(N_SEC):
             if   self.hist_sm[k]>=hi: self.binary[k]=False
             elif self.hist_sm[k]<=lo: self.binary[k]=True
-            # else: keep (hysteresis)
 
     def valleys(self):
         n=N_SEC; b2=np.concatenate([self.binary,self.binary])
@@ -429,7 +395,6 @@ class VFHPlus:
                  +COST_W_CONT   *self.sdiff(cand,forward_sec))
             if cost<best_cost:
                 best_cost=cost; best_v=v; best_sec=cand
-        # convert sector → signed angle
         deg=(best_sec*ALPHA+ALPHA/2.)%360.
         if deg>180.: deg-=360.
         return best_v, math.radians(deg)
@@ -443,11 +408,6 @@ class VFHPlus:
         return vals,bv,steer
 
 
-# ══════════════════════════════════════════════════════════════
-#  FGM  — Follow the Gap Method (Sezer & Gokasan 2012)
-#  Works on RAW scan — independent of VFH thresholds
-#  No local-minimum problem by design
-# ══════════════════════════════════════════════════════════════
 def fgm(dists, angs, forward_deg):
     """
     1. Find all gap edges (large distance jumps between adjacent readings)
@@ -459,27 +419,22 @@ def fgm(dists, angs, forward_deg):
     n=len(dists)
     if n<2: return None, 0.
 
-    # Sort by angle for adjacency
     order=np.argsort(angs)
     sa=angs[order]; sd=dists[order]
 
     gaps=[]
     i=0
     while i<n:
-        # look for a "jump up" (start of a gap)
         j=(i+1)%n
         d_cur=float(sd[i]); d_next=float(sd[j])
         if d_next-d_cur>FGM_MIN_GAP_M and d_cur>0.03:
-            # gap starts here — find where it ends (jump down)
             gap_start=float(sa[i])
             k=j
             while k!=i:
                 kn=(k+1)%n
                 if float(sd[k])-float(sd[kn])>FGM_MIN_GAP_M or kn==i:
                     gap_end=float(sa[k])
-                    # gap width in angle
                     gap_width=abs(angle_diff(gap_end,gap_start))
-                    # check if robot can fit: gap_width_m at gap_dist
                     gap_dist=float(sd[j:k+1].max()) if k>=j else float(sd[j])
                     gap_w_m=gap_dist*gap_width
                     if gap_w_m>FGM_ROBOT_D:
@@ -492,16 +447,15 @@ def fgm(dists, angs, forward_deg):
     if not gaps:
         return None, 0.
 
-    # Score: prefer wide+far+forward
     fr=math.radians(forward_deg)
     best_score=-1e9; best_ang=fr
     for gc,gw,gd in gaps:
-        align=1.-abs(angle_diff(gc,fr))/math.pi   # 1=forward, 0=behind
+        align=1.-abs(angle_diff(gc,fr))/math.pi
         score=FGM_ALPHA*(gw*gd)+(1.-FGM_ALPHA)*align
         if score>best_score:
             best_score=score; best_ang=gc
 
-    steer=angle_diff(best_ang,fr)   # signed rad vs forward
+    steer=angle_diff(best_ang,fr)
     return gaps, float(np.clip(steer,-MAX_STEER,MAX_STEER))
 
 
@@ -522,9 +476,6 @@ def hemi_blocked(binary,center_deg,half_deg):
     return bl/(2*hs+1)
 
 
-# ══════════════════════════════════════════════════════════════
-#  DEMO
-# ══════════════════════════════════════════════════════════════
 _dt=0.
 def demo():
     global _dt
@@ -539,9 +490,6 @@ def demo():
     _dt+=LOOP_T
     return d,a
 
-# ══════════════════════════════════════════════════════════════
-#  KEYBOARD
-# ══════════════════════════════════════════════════════════════
 def setup_tty():
     fd=sys.stdin.fileno(); old=termios.tcgetattr(fd); tty.setraw(fd); return old
 def restore_tty(old):
@@ -549,9 +497,6 @@ def restore_tty(old):
 def readkey():
     return sys.stdin.read(1) if select.select([sys.stdin],[],[],0)[0] else None
 
-# ══════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════
 def main():
     card=None; lidar=None
     mb=np.array([0.,0.],dtype=np.float64)
@@ -583,9 +528,8 @@ def main():
 
     cv=make_canvas(); vfh=VFHPlus()
 
-    # ── state ─────────────────────────────────────────────────
     mode        = "DRIVE"
-    state       = "DRIVE"   # DRIVE / REVERSE / ESCAPE / STOP
+    state       = "DRIVE"
     steer       = 0.
     thr         = 0.
     max_thr     = MAX_THR
@@ -610,7 +554,6 @@ def main():
         while True:
             t0=time.time()
 
-            # ── keys ──────────────────────────────────────────
             k=readkey()
             if k:
                 if k in('q','Q','\x03'): break
@@ -620,7 +563,6 @@ def main():
                 elif k in('+','='): max_thr=min(1.,round(max_thr+THR_STEP,3))
                 elif k in('-','_'): max_thr=max(0.,round(max_thr-THR_STEP,3))
 
-            # ── scan ──────────────────────────────────────────
             if HARDWARE and lidar:
                 lidar.read()
                 dists=lidar.distances.flatten().copy()
@@ -631,16 +573,13 @@ def main():
             valid_d=dists[dists>0.03]
             min_d=float(valid_d.min()) if len(valid_d) else 99.
 
-            # ── VFH+ (always run full 360°) ───────────────────
             forward_deg=(FRONT_DEG if mode=="DRIVE" else REAR_DEG)
             all_v,best_v,vfh_steer=vfh.run(dists,angs,forward_deg)
 
-            # ── FGM fallback (always run, independent) ────────
             fgm_gaps,fgm_steer_raw=fgm(dists,angs,forward_deg)
             fgm_ang=(math.radians(forward_deg)+fgm_steer_raw
                      if fgm_gaps else None)
 
-            # ── blocked detection (soft, confirmed) ───────────
             fb=hemi_blocked(vfh.binary,FRONT_DEG,FRONT_CHECK_DEG)
             rb=hemi_blocked(vfh.binary,REAR_DEG, FRONT_CHECK_DEG)
             front_blk_q.append(fb>=BLOCKED_FRAC)
@@ -648,31 +587,25 @@ def main():
             front_confirmed=all(front_blk_q) and len(front_blk_q)==CONFIRM_FRAMES
             rear_confirmed =all(rear_blk_q)  and len(rear_blk_q) ==CONFIRM_FRAMES
 
-            # ── ESTOP check ───────────────────────────────────
             if min_d < ESTOP_M:
                 state="STOP"; steer=0.; thr=0.
                 status=f"ESTOP {min_d:.2f}m"; algo="ESTOP"
 
-            # ── STATE MACHINE ─────────────────────────────────
             elif state=="ESCAPE":
                 et=time.time()-escape_start
                 if et>ESCAPE_MAX_S:
-                    # try flipping mode after escape timeout
                     mode="REVERSE" if mode=="DRIVE" else "DRIVE"
                     state=mode; sw+=1
                     escape_dir*=-1; no_gap_since=None
                 elif all_v or fgm_gaps:
-                    # gap appeared — exit escape
                     state=mode; no_gap_since=None
                 else:
-                    # keep escaping: spin in place
                     steer=float(np.clip(ESCAPE_STEER*escape_dir,
                                        -MAX_STEER,MAX_STEER))
                     thr=ESCAPE_THROTTLE if mode=="DRIVE" else -ESCAPE_THROTTLE
                     algo="ESCAPE"; status=f"spinning {et:.1f}s"
 
             elif state in("DRIVE","REVERSE"):
-                # auto mode flip on confirmed block
                 if mode=="DRIVE" and front_confirmed and not rear_confirmed:
                     mode="REVERSE"; state="REVERSE"; sw+=1
                     vfh.prev_st=0.; status="AUTO→REVERSE"
@@ -680,15 +613,11 @@ def main():
                     mode="DRIVE"; state="DRIVE"; sw+=1
                     vfh.prev_st=0.; status="AUTO→DRIVE"
                 elif front_confirmed and rear_confirmed:
-                    # both blocked → escape
                     state="ESCAPE"; escape_start=time.time()
                     escape_dir=1; status="BOTH→ESCAPE"
 
-                # pick algorithm
                 if all_v:
-                    # VFH+ has valleys — use it (most informed)
                     raw_steer=vfh_steer
-                    # IIR smooth
                     steer=(STEER_SMOOTH*vfh.prev_st
                            +(1.-STEER_SMOOTH)*raw_steer)
                     vfh.prev_st=steer
@@ -697,7 +626,6 @@ def main():
                     bv_str=(f"w={best_v[3]*ALPHA}°" if best_v else "")
                     status=f"valley {bv_str} st={math.degrees(steer):+.0f}°"
                 elif fgm_gaps:
-                    # VFH found nothing but FGM found a gap — fallback
                     raw_steer=fgm_steer_raw
                     steer=(STEER_SMOOTH*vfh.prev_st
                            +(1.-STEER_SMOOTH)*raw_steer)
@@ -707,7 +635,6 @@ def main():
                     status=f"gap st={math.degrees(steer):+.0f}°"
                     no_gap_since=None
                 else:
-                    # no gap from either — track time
                     algo="NONE"
                     status="no gap found..."
                     if no_gap_since is None:
@@ -715,10 +642,8 @@ def main():
                     elif time.time()-no_gap_since>ESCAPE_TRIGGER_S:
                         state="ESCAPE"; escape_start=time.time()
                         escape_dir=1; no_gap_since=None
-                    # hold last steer while waiting
                     steer=vfh.prev_st
 
-                # adaptive throttle (only if not in escape/stop)
                 if state in("DRIVE","REVERSE"):
                     near_sc=1.
                     if min_d<SLOW_NEAR_M:
@@ -729,15 +654,13 @@ def main():
                               /(90.-SLOW_STEER_DEG)) if sd_deg>SLOW_STEER_DEG else 1.
                     raw_thr=max_thr*near_sc*steer_sc
                     thr=float(np.clip(raw_thr,0.,max_thr))
-                    if thr<MIN_THR: thr=MIN_THR   # never dip below min while moving
+                    if thr<MIN_THR: thr=MIN_THR
                     if mode=="REVERSE": thr=-thr
 
             elif state=="STOP":
-                # re-check — maybe obstacle moved
                 if min_d>ESTOP_M*1.5:
                     state=mode
 
-            # ── motor ─────────────────────────────────────────
             if HARDWARE and card:
                 mb[0]=thr; mb[1]=steer
                 try:
@@ -746,12 +669,10 @@ def main():
                     enc_m=int(eb[0])*MPC
                 except HILError: pass
 
-            # ── fps ───────────────────────────────────────────
             now=time.time()
             fps_s=fps_s*.85+(1./max(now-t_last,1e-4))*.15
             t_last=now; scan_n+=1
 
-            # ── render ────────────────────────────────────────
             cv[:]=CB
             draw_grid(cv)
             draw_hist_ring(cv,vfh.hist_sm)

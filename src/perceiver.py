@@ -15,9 +15,8 @@ import threading
 import numpy as np
 from pit.YOLO.nets import YOLOv8
 
-# COCO class categorisation
 PERSON_IDS = {0}
-MOVING_IDS = {1, 2, 3, 16}   # bicycle, car, motorcycle, dog
+MOVING_IDS = {1, 2, 3, 16}
 STATIC_IDS = {
     24, 25, 26, 28, 32, 39, 41, 43, 44, 45,
     56, 57, 58, 59, 60, 62, 63, 67, 73, 74, 76, 79,
@@ -43,10 +42,10 @@ class PerceiverConfig:
     IMAGE_HEIGHT       = 480
     CONFIDENCE         = 0.35
     FORWARD_COL_CENTRE = 320
-    FORWARD_COL_MARGIN = 220   # ±220px from centre = full useful width
+    FORWARD_COL_MARGIN = 220
     MAX_DIST_M         = 3.0
-    MODEL_PATH         = None  # None = use default (auto-downloads)
-    THREADED           = True  # run YOLO in background thread
+    MODEL_PATH         = None
+    THREADED           = True
 
 
 def _empty():
@@ -85,7 +84,6 @@ class Perceiver:
         self._yolo     = None
         self._threaded = config.THREADED
 
-        # Threading state
         self._thread        = None
         self._running       = False
         self._frame_lock    = threading.Lock()
@@ -133,13 +131,11 @@ class Perceiver:
             return _empty()
 
         if self._threaded:
-            # Post frame for background processing
             with self._frame_lock:
                 self._pending_frame = bgr_frame.copy()
                 self._pending_depth = depth_frame.copy()
             self._new_frame_evt.set()
 
-            # Return latest available result (non-blocking)
             with self._result_lock:
                 return dict(self._latest_result)
         else:
@@ -148,12 +144,10 @@ class Perceiver:
     def _inference_loop(self):
         """Background thread: waits for new frames, runs YOLO, stores result."""
         while self._running:
-            # Wait for a new frame (with timeout to allow clean shutdown)
             if not self._new_frame_evt.wait(timeout=0.1):
                 continue
             self._new_frame_evt.clear()
 
-            # Grab the latest frame
             with self._frame_lock:
                 if self._pending_frame is None:
                     continue
@@ -161,10 +155,8 @@ class Perceiver:
                 depth = self._pending_depth
                 self._pending_frame = None
 
-            # Run inference (this is the slow part — 15-30ms on Jetson)
             result = self._run_inference(frame, depth)
 
-            # Store result for main thread
             with self._result_lock:
                 self._latest_result = result
 
@@ -239,7 +231,7 @@ class Perceiver:
     def close(self):
         if self._threaded and self._running:
             self._running = False
-            self._new_frame_evt.set()   # unblock the wait
+            self._new_frame_evt.set()
             if self._thread is not None:
                 self._thread.join(timeout=2.0)
             print("  YOLO inference thread: stopped")

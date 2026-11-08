@@ -34,10 +34,6 @@ from perception  import SensorManager, Config as PerceptionConfig
 from perceiver   import Perceiver, PerceiverConfig, OBJ_PERSON, OBJ_MOVING, OBJ_STATIC, OBJ_NONE
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  BEHAVIOUR CONSTANTS  (used by state_machine.py)
-# ═════════════════════════════════════════════════════════════════════════════
-
 BEHAVIOUR_NAVIGATE        = 'NAVIGATE'
 BEHAVIOUR_WAIT            = 'WAIT'
 BEHAVIOUR_AVOID           = 'AVOID'
@@ -48,51 +44,35 @@ ZONE_WARN  = 'WARN'
 ZONE_STOP  = 'STOP'
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  CONFIG
-# ═════════════════════════════════════════════════════════════════════════════
-
 class DetectorConfig:
 
-    # LiDAR zones
     WARN_DISTANCE_M    = 1.5
     STOP_DISTANCE_M    = 0.4
 
-    # LiDAR forward sector: ±40° around 0 (forward)
     FORWARD_HALF_ANGLE = np.radians(40)
     MIN_SECTOR_READINGS= 3
     DISTANCE_SMOOTH_N  = 3
 
-    # RealSense depth strip for avoidance decision
     DEPTH_ROW_START    = 160
     DEPTH_ROW_END      = 320
     DEPTH_MAX_M        = 3.0
     DEPTH_MIN_VALID_PX = 80
 
-    # Gap finder: scan columns in WARN_DISTANCE_M wide strip
-    # A "gap" is a contiguous column range where depth > GAP_MIN_DEPTH_M
-    GAP_MIN_DEPTH_M    = 0.8    # column must have at least this much clearance
-    GAP_MIN_WIDTH_PX   = 60     # minimum gap width in pixels to be usable
+    GAP_MIN_DEPTH_M    = 0.8
+    GAP_MIN_WIDTH_PX   = 60
 
-    # Dashboard polar plot
     PLOT_MAX_RANGE_M   = 4.0
     DASHBOARD_PORT     = 5000
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  EMPTY RESULT
-# ═════════════════════════════════════════════════════════════════════════════
-
 def _empty_result() -> dict:
     return {
-        # Core outputs for state_machine.py
         'zone':             ZONE_CLEAR,
         'distance_m':       99.0,
         'avoid_side':       'left',
         'obstacle_type':    OBJ_NONE,
         'behaviour':        BEHAVIOUR_NAVIGATE,
 
-        # Detail for dashboard
         'sector_min_m':     99.0,
         'left_count':       0,
         'right_count':      0,
@@ -112,10 +92,6 @@ def _empty_result() -> dict:
         'battery_v':        0.0,
     }
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  OBSTACLE DETECTOR
-# ═════════════════════════════════════════════════════════════════════════════
 
 class ObstacleDetector:
     """
@@ -139,7 +115,6 @@ class ObstacleDetector:
     def detect(self, sensor_data: dict) -> dict:
         new_scan = sensor_data.get('lidar_new_scan', False)
 
-        # ── LiDAR ─────────────────────────────────────────────────────────
         if new_scan:
             lidar = self._analyse_lidar(
                 sensor_data['lidar_distances'],
@@ -155,19 +130,15 @@ class ObstacleDetector:
                 'right_count': self._last['right_count'],
             }
 
-        # ── RealSense depth ────────────────────────────────────────────────
         depth = self._analyse_depth(sensor_data['rs_depth_m'])
 
-        # ── YOLO (runs every tick on GPU — fast enough) ────────────────────
         perception = self.perceiver.perceive(
             sensor_data['csi_frames']['2'],
             sensor_data['rs_depth_m'],
         )
 
-        # ── Combine all three ──────────────────────────────────────────────
         result = self._combine(lidar, depth, perception, new_scan)
 
-        # Attach raw data for dashboard
         result['all_distances']   = sensor_data['lidar_distances'].copy()
         result['all_angles']      = sensor_data['lidar_angles'].copy()
         result['all_valid']       = sensor_data['lidar_valid'].copy()
@@ -177,9 +148,6 @@ class ObstacleDetector:
         self._last = result
         return result
 
-    # ──────────────────────────────────────────────────────────────────────
-    #  LIDAR
-    # ──────────────────────────────────────────────────────────────────────
 
     def _analyse_lidar(self, distances, angles, valid) -> dict:
         cfg = self.cfg
@@ -219,9 +187,6 @@ class ObstacleDetector:
             'left_count': lc, 'right_count': rc,
         }
 
-    # ──────────────────────────────────────────────────────────────────────
-    #  REALSENSE DEPTH — gap finder
-    # ──────────────────────────────────────────────────────────────────────
 
     def _analyse_depth(self, depth_frame: np.ndarray) -> dict:
         """
@@ -235,16 +200,13 @@ class ObstacleDetector:
         W     = strip.shape[1]
         mid   = W // 2
 
-        # Column-wise mean depth (ignore zeros = invalid pixels)
         col_means = np.where(strip > 0, strip, np.nan)
         col_means = np.nanmean(col_means, axis=0)
         col_means = np.nan_to_num(col_means, nan=0.0)
 
-        # Simple left/right mean for avoidance direction
         left_mean  = float(col_means[:mid].mean()) if col_means[:mid].mean() > 0 else 99.0
         right_mean = float(col_means[mid:].mean()) if col_means[mid:].mean() > 0 else 99.0
 
-        # Gap finder: find widest contiguous clear column range
         clear_cols = col_means > cfg.GAP_MIN_DEPTH_M
         best_gap_start, best_gap_len = 0, 0
         cur_start, cur_len = 0, 0
@@ -262,7 +224,6 @@ class ObstacleDetector:
         gap_centre = best_gap_start + best_gap_len // 2
         gap_side   = 'left' if gap_centre < mid else 'right'
 
-        # Fallback to simple left/right if no gap found
         if best_gap_len < cfg.GAP_MIN_WIDTH_PX:
             gap_side = 'left' if left_mean >= right_mean else 'right'
 
@@ -273,9 +234,6 @@ class ObstacleDetector:
             'gap_width_px':  best_gap_len,
         }
 
-    # ──────────────────────────────────────────────────────────────────────
-    #  COMBINE
-    # ──────────────────────────────────────────────────────────────────────
 
     def _combine(self, lidar: dict, depth: dict,
                  perception: dict, new_scan: bool) -> dict:
@@ -292,17 +250,16 @@ class ObstacleDetector:
         obj_type  = perception['nearest_type']
         avoid_side= depth['gap_side']
 
-        # Behaviour decision
         if zone == ZONE_STOP:
             behaviour = BEHAVIOUR_EMERGENCY_STOP
 
         elif zone == ZONE_WARN:
             if obj_type in (OBJ_PERSON, OBJ_MOVING):
-                behaviour = BEHAVIOUR_WAIT    # entity will move — wait
+                behaviour = BEHAVIOUR_WAIT
             else:
-                behaviour = BEHAVIOUR_AVOID   # static or unknown — steer around
+                behaviour = BEHAVIOUR_AVOID
 
-        else:  # ZONE_CLEAR
+        else:
             behaviour = BEHAVIOUR_NAVIGATE
 
         return {

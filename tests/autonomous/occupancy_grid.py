@@ -19,9 +19,8 @@ class OccupancyGrid:
         res = cfg.GRID_RESOLUTION_M
         size = cfg.GRID_SIZE_M
         self._res = res
-        self._n = int(size / res)  # cells per side (200 for 10m at 5cm)
-        self._half = self._n // 2  # center cell index
-        # Log-odds grid: 0 = unknown
+        self._n = int(size / res)
+        self._half = self._n // 2
         self._log_odds = np.zeros((self._n, self._n), dtype=np.float32)
 
     def reset(self):
@@ -49,15 +48,12 @@ class OccupancyGrid:
             if d > cfg.LIDAR_MAX_M or d < cfg.LIDAR_MIN_M:
                 continue
 
-            # World angle of this LiDAR ray
             world_angle = ptheta + angles[i]
 
-            # Endpoint in world frame
             wx = px + d * math.cos(world_angle)
             wy = py + d * math.sin(world_angle)
             ex, ey = self._world_to_grid(wx, wy)
 
-            # Bresenham ray: mark cells along ray as FREE
             self._trace_ray(cx, cy, ex, ey, d)
 
     def _trace_ray(self, x0, y0, x1, y1, dist):
@@ -76,11 +72,9 @@ class OccupancyGrid:
         while True:
             if 0 <= x < n and 0 <= y < n:
                 if x == x1 and y == y1:
-                    # Endpoint = occupied
                     lo[y, x] = min(lo[y, x] + cfg.GRID_LOG_OCC,
                                    cfg.GRID_LOG_MAX)
                 else:
-                    # Traversed = free
                     lo[y, x] = max(lo[y, x] + cfg.GRID_LOG_FREE,
                                    cfg.GRID_LOG_MIN)
 
@@ -101,7 +95,7 @@ class OccupancyGrid:
         if 0 <= gx < self._n and 0 <= gy < self._n:
             prob = 1.0 / (1.0 + math.exp(-self._log_odds[gy, gx]))
             return prob > cfg.GRID_OCC_THRESH
-        return True  # out of bounds = occupied
+        return True
 
     def get_binary_grid(self):
         """Return binary occupancy grid (True = occupied/unknown).
@@ -109,7 +103,6 @@ class OccupancyGrid:
         prob = 1.0 / (1.0 + np.exp(-self._log_odds))
         occupied = prob > cfg.GRID_OCC_THRESH
 
-        # Inflate obstacles by car radius
         inflate = cfg.ASTAR_INFLATE_CELLS
         if inflate > 0:
             inflated = occupied.copy()
@@ -138,7 +131,7 @@ class OccupancyGrid:
         prob = 1.0 / (1.0 + np.exp(-self._log_odds))
         occ_y, occ_x = np.where(prob > cfg.GRID_OCC_THRESH)
         points = []
-        for i in range(0, len(occ_x), 2):  # skip every other for bandwidth
+        for i in range(0, len(occ_x), 2):
             wx, wy = self._grid_to_world(int(occ_x[i]), int(occ_y[i]))
             points.append({'x': round(wx, 2), 'y': round(wy, 2)})
         return points

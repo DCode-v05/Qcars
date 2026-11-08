@@ -20,12 +20,10 @@ import warnings
 from perceiver import (Perceiver, PerceiverConfig,
                        OBJ_PERSON, OBJ_MOVING, OBJ_STATIC, OBJ_NONE)
 
-# Zone constants
 ZONE_CLEAR = 'CLEAR'
 ZONE_WARN  = 'WARN'
 ZONE_STOP  = 'STOP'
 
-# Behaviour constants
 BEHAVIOUR_NAVIGATE       = 'NAVIGATE'
 BEHAVIOUR_WAIT           = 'WAIT'
 BEHAVIOUR_AVOID          = 'AVOID'
@@ -33,26 +31,22 @@ BEHAVIOUR_EMERGENCY_STOP = 'EMERGENCY_STOP'
 
 
 class DetectorConfig:
-    # Forward sector (for zone classification)
     WARN_DISTANCE_M     = 1.5
     STOP_DISTANCE_M     = 0.4
     FORWARD_HALF_ANGLE  = np.radians(40)
     MIN_SECTOR_READINGS = 3
     DISTANCE_SMOOTH_N   = 3
 
-    # Rear sector
     REAR_HALF_ANGLE     = np.radians(40)
     REAR_CLEAR_M        = 0.5
 
-    # VFH path planner
-    NUM_BINS            = 36        # 360° / 36 = 10° per bin
+    NUM_BINS            = 36
     BIN_WIDTH_RAD       = 2 * np.pi / 36
-    GAP_THRESHOLD_M     = 0.6      # bin is "open" if min_dist > this
-    MIN_GAP_BINS        = 3         # gap must be >= 3 bins wide (30°)
-    GOAL_BIAS_WEIGHT    = 2.0       # extra score for gaps near goal direction
-    PATH_MAX_RANGE_M    = 4.0       # clip LiDAR beyond this for planning
+    GAP_THRESHOLD_M     = 0.6
+    MIN_GAP_BINS        = 3
+    GOAL_BIAS_WEIGHT    = 2.0
+    PATH_MAX_RANGE_M    = 4.0
 
-    # Depth camera
     DEPTH_ROW_START     = 160
     DEPTH_ROW_END       = 320
     DEPTH_MAX_M         = 3.0
@@ -60,7 +54,6 @@ class DetectorConfig:
     GAP_MIN_DEPTH_M     = 0.8
     GAP_MIN_WIDTH_PX    = 60
 
-    # LiDAR-to-camera correlation
     CAMERA_FOV_RAD       = np.radians(90)
     CAMERA_WIDTH_PX      = 640
     LIDAR_YOLO_ANGLE_TOL = np.radians(12)
@@ -90,11 +83,9 @@ def _empty_result():
         'all_valid':       np.array([], dtype=bool),
         'annotated_frame': None,
         'battery_v':       0.0,
-        # Rear awareness
         'rear_min_m':      99.0,
         'rear_clear':      True,
         'front_blocked':   False,
-        # Path planner output
         'has_path':        True,
         'best_path_angle': 0.0,
         'path_steer':      0.0,
@@ -111,7 +102,7 @@ class ObstacleDetector:
         self.perceiver  = perceiver
         self._dist_hist = []
         self._last      = _empty_result()
-        self._goal_heading = 0.0    # set by observer each tick
+        self._goal_heading = 0.0
 
     def set_goal_heading(self, heading_rad: float):
         """Set current heading toward goal (from navigator). Used to bias path selection."""
@@ -162,12 +153,10 @@ class ObstacleDetector:
         front_blocked = lidar_fwd['zone'] in (ZONE_STOP, ZONE_WARN)
         result = self._combine(lidar_fwd, depth, perception, new_scan, correlated_type)
 
-        # Rear awareness
         result['rear_min_m']    = lidar_rear['rear_min_m']
         result['rear_clear']    = lidar_rear['rear_clear']
         result['front_blocked'] = front_blocked
 
-        # Path planner output
         result['has_path']          = path_plan['has_path']
         result['best_path_angle']   = path_plan['best_path_angle']
         result['path_steer']        = path_plan['path_steer']
@@ -175,15 +164,12 @@ class ObstacleDetector:
         result['best_gap_width_deg']= path_plan['best_gap_width_deg']
         result['best_gap_depth_m']  = path_plan['best_gap_depth_m']
 
-        # Override avoid_side from path planner (more accurate than depth alone)
         if path_plan['has_path']:
             angle = path_plan['best_path_angle']
-            # Normalize to [-π, π]: positive = left, negative = right
             if angle > np.pi:
                 angle -= 2 * np.pi
             result['avoid_side'] = 'left' if angle >= 0 else 'right'
 
-        # Raw LiDAR for dashboard
         result['all_distances']   = distances.copy() if len(distances) > 0 else np.array([])
         result['all_angles']      = angles.copy() if len(angles) > 0 else np.array([])
         result['all_valid']       = valid.copy() if len(valid) > 0 else np.array([], dtype=bool)
@@ -193,7 +179,6 @@ class ObstacleDetector:
         self._last = result
         return result
 
-    # ── VFH Path Planner ─────────────────────────────────────────────────────
 
     def _find_best_path(self, distances, angles, valid) -> dict:
         """
@@ -214,12 +199,10 @@ class ObstacleDetector:
         }
 
         if len(distances) == 0 or valid.sum() < 5:
-            return {**no_path, 'has_path': True}  # no data = assume clear
+            return {**no_path, 'has_path': True}
 
-        # Step 1: Build angular histogram
-        # Bins: 0..NUM_BINS-1, each covers BIN_WIDTH_RAD
         n_bins = cfg.NUM_BINS
-        bin_min = np.full(n_bins, cfg.PATH_MAX_RANGE_M)  # max distance = "clear"
+        bin_min = np.full(n_bins, cfg.PATH_MAX_RANGE_M)
         bin_count = np.zeros(n_bins, dtype=int)
 
         v_mask = valid & (distances > 0.05) & (distances < cfg.PATH_MAX_RANGE_M)
@@ -233,14 +216,9 @@ class ObstacleDetector:
             if v_dist[i] < bin_min[b]:
                 bin_min[b] = v_dist[i]
 
-        # Bins with no readings → assume clear (no obstacle detected there)
-        # (LiDAR might not have full coverage in some angles)
 
-        # Step 2: Mark open/blocked bins
         is_open = bin_min > cfg.GAP_THRESHOLD_M
 
-        # Step 3: Find contiguous gaps (circular — wraps around)
-        # Double the array to handle wrap-around
         doubled = np.concatenate([is_open, is_open])
         gaps = []
         i = 0
@@ -250,13 +228,11 @@ class ObstacleDetector:
                 while i < 2 * n_bins and doubled[i]:
                     i += 1
                 length = i - start
-                # Only keep gaps that don't span more than full circle
                 if length <= n_bins:
                     gaps.append((start % n_bins, length))
             else:
                 i += 1
 
-        # Deduplicate gaps that appear twice due to doubling
         seen = set()
         unique_gaps = []
         for start, length in gaps:
@@ -268,7 +244,6 @@ class ObstacleDetector:
         if not unique_gaps:
             return no_path
 
-        # Step 4: Score each gap
         goal_heading = self._goal_heading
         if goal_heading < 0:
             goal_heading += 2 * np.pi
@@ -277,28 +252,22 @@ class ObstacleDetector:
         best_gap   = None
 
         for start, length in unique_gaps:
-            # Center angle of gap
             center_bin = (start + length / 2.0) % n_bins
             center_angle = center_bin * cfg.BIN_WIDTH_RAD
 
-            # Average depth of bins in this gap
             gap_bins = [(start + j) % n_bins for j in range(length)]
             gap_depths = bin_min[gap_bins]
             avg_depth = float(np.mean(gap_depths))
 
-            # Width in degrees
             width_deg = length * np.degrees(cfg.BIN_WIDTH_RAD)
 
-            # Angular distance from goal direction
             angle_diff = abs(center_angle - goal_heading)
             if angle_diff > np.pi:
                 angle_diff = 2 * np.pi - angle_diff
 
-            # Score: prefer wide gaps, deep gaps, near goal
-            # Normalize: width [0-360] → [0-1], depth [0-4] → [0-1]
             width_score = min(width_deg / 180.0, 1.0)
             depth_score = min(avg_depth / cfg.PATH_MAX_RANGE_M, 1.0)
-            goal_score  = 1.0 - (angle_diff / np.pi)  # 1.0 = toward goal, 0.0 = opposite
+            goal_score  = 1.0 - (angle_diff / np.pi)
 
             score = (width_score * 0.3 +
                      depth_score * 0.3 +
@@ -313,24 +282,16 @@ class ObstacleDetector:
 
         best_angle, gap_width_deg, gap_depth = best_gap
 
-        # Step 5: Convert best angle to steering command
-        # Normalize angle to [-π, π] where 0 = forward
         steer_angle = best_angle
         if steer_angle > np.pi:
             steer_angle -= 2 * np.pi
 
-        # Is the best path forward or behind us?
-        is_forward = abs(steer_angle) <= (np.pi / 2 + 0.2)  # ~110° tolerance
+        is_forward = abs(steer_angle) <= (np.pi / 2 + 0.2)
 
-        # Steering command: proportional to angle offset, clamped to ±π/6
         max_steer = np.pi / 6
         if is_forward:
-            # Steer toward gap: positive steer_angle = left = positive steering
             path_steer = float(np.clip(steer_angle * 0.8, -max_steer, max_steer))
         else:
-            # Gap is behind us → need to reverse
-            # While reversing, steering is inverted: steer toward where rear should go
-            # If gap is at +150° (rear-left), reverse and steer right to swing rear left
             rear_angle = steer_angle - np.sign(steer_angle) * np.pi
             path_steer = float(np.clip(rear_angle * 0.8, -max_steer, max_steer))
 
@@ -343,7 +304,6 @@ class ObstacleDetector:
             'best_gap_depth_m':   gap_depth,
         }
 
-    # ── Forward / Rear sector analysis ────────────────────────────────────────
 
     def _analyse_lidar_forward(self, distances, angles, valid) -> dict:
         cfg = self.cfg
@@ -395,7 +355,6 @@ class ObstacleDetector:
         rear_min = float(rear_d.min())
         return {'rear_min_m': rear_min, 'rear_clear': rear_min > cfg.REAR_CLEAR_M}
 
-    # ── Depth camera ──────────────────────────────────────────────────────────
 
     def _analyse_depth(self, depth_frame: np.ndarray) -> dict:
         cfg = self.cfg
@@ -445,7 +404,6 @@ class ObstacleDetector:
         return {'left_clear_m': lm, 'right_clear_m': rm,
                 'gap_side': gap_side, 'gap_width_px': best_len}
 
-    # ── YOLO correlation ──────────────────────────────────────────────────────
 
     def _correlate_lidar_yolo(self, distances, angles, valid, perception) -> str:
         cfg = self.cfg
@@ -478,7 +436,6 @@ class ObstacleDetector:
 
         return OBJ_STATIC
 
-    # ── Combine all sources ───────────────────────────────────────────────────
 
     def _combine(self, lidar, depth, perception, new_scan, correlated_type=None) -> dict:
         zone     = lidar['zone']

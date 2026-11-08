@@ -18,34 +18,27 @@ import time
 from quanser.hardware import HIL
 from quanser.hardware.exceptions import HILError
 
-# ══════════════════════════════════════════════════════════════
-# QCar 2 Channel Map
-# ══════════════════════════════════════════════════════════════
 CARD_TYPE        = "qcar2"
 CARD_ID          = "0"
 
-THROTTLE_CHANNEL = 11000      # motor throttle (%)
-STEERING_CHANNEL = 1000       # steering angle (rad)
+THROTTLE_CHANNEL = 11000
+STEERING_CHANNEL = 1000
 
-# Steering limits (radians)
-MAX_STEER_RAD    =  0.5       # full right
-MIN_STEER_RAD    = -0.5       # full left
-STEER_STEP_RAD   =  0.05      # increment per step (~3 degrees)
+MAX_STEER_RAD    =  0.5
+MIN_STEER_RAD    = -0.5
+STEER_STEP_RAD   =  0.05
 
-# ── Test Profile ──────────────────────────────────────────────
-# (steering_rad, hold_seconds, label)
 TEST_PHASES = [
-    ( 0.00, 2.0, "STRAIGHT      "),   # centre
-    ( 0.10, 2.0, "RIGHT SLIGHT  "),   # slight right
-    ( 0.25, 2.0, "RIGHT MEDIUM  "),   # medium right
-    ( 0.50, 2.0, "RIGHT FULL    "),   # full right
-    ( 0.00, 2.0, "STRAIGHT      "),   # back to centre
-    (-0.10, 2.0, "LEFT  SLIGHT  "),   # slight left
-    (-0.25, 2.0, "LEFT  MEDIUM  "),   # medium left
-    (-0.50, 2.0, "LEFT  FULL    "),   # full left
-    ( 0.00, 2.0, "STRAIGHT      "),   # return to centre
+    ( 0.00, 2.0, "STRAIGHT      "),
+    ( 0.10, 2.0, "RIGHT SLIGHT  "),
+    ( 0.25, 2.0, "RIGHT MEDIUM  "),
+    ( 0.50, 2.0, "RIGHT FULL    "),
+    ( 0.00, 2.0, "STRAIGHT      "),
+    (-0.10, 2.0, "LEFT  SLIGHT  "),
+    (-0.25, 2.0, "LEFT  MEDIUM  "),
+    (-0.50, 2.0, "LEFT  FULL    "),
+    ( 0.00, 2.0, "STRAIGHT      "),
 ]
-# ══════════════════════════════════════════════════════════════
 
 
 def rad_to_deg(rad):
@@ -71,7 +64,6 @@ def main():
         print("Aborted.")
         return
 
-    # ── Open HIL board ────────────────────────────────────────
     print("\n[1/2] Opening HIL board ...")
     try:
         card = HIL(CARD_TYPE, CARD_ID)
@@ -80,15 +72,11 @@ def main():
         print(f"      ❌ {e.get_error_message()}")
         return
 
-    # Both throttle + steering written together
     channels = np.array([THROTTLE_CHANNEL, STEERING_CHANNEL],
                          dtype=np.uint32)
     buffer   = np.array([0.0, 0.0], dtype=np.float64)
-    #                        ↑   ↑
-    #                   throttle  steering
 
     try:
-        # ── Zero both outputs first ───────────────────────────
         card.write_other(channels, 2, buffer)
         print("[2/2] Outputs zeroed. Starting steering test ...\n")
 
@@ -101,15 +89,13 @@ def main():
 
         for steer_rad, hold_sec, label in TEST_PHASES:
 
-            # Write steering — motor stays 0.0
-            buffer[0] = 0.0          # throttle = OFF
-            buffer[1] = steer_rad    # steering = target angle
+            buffer[0] = 0.0
+            buffer[1] = steer_rad
             card.write_other(channels, 2, buffer)
 
             elapsed   = time.time() - start_time
             steer_deg = rad_to_deg(steer_rad)
 
-            # Direction indicator
             if steer_rad > 0.01:
                 direction = "→ RIGHT"
             elif steer_rad < -0.01:
@@ -131,11 +117,10 @@ def main():
         print(f"\n❌ HILError: {e.get_error_message()}")
 
     finally:
-        # ── Always return to straight + stop ──────────────────
         print("\n── Cleanup ───────────────────────────────────────────")
         try:
-            buffer[0] = 0.0   # throttle = 0
-            buffer[1] = 0.0   # steering = straight
+            buffer[0] = 0.0
+            buffer[1] = 0.0
             card.write_other(channels, 2, buffer)
             print("  ✅ Steering centred  (0.0 rad)")
             print("  ✅ Throttle stopped  (0.0)")

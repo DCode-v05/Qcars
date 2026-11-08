@@ -7,19 +7,14 @@ from flask import Flask, Response
 from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
 from quanser.multimedia.exceptions import MediaError
 
-# ══════════════════════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════════════════════
 FRAME_WIDTH  = 820
 FRAME_HEIGHT = 410
 FRAME_RATE   = 120.0
 SENSOR_ID    = 2
-# ══════════════════════════════════════════════════════════════
 
 app        = Flask(__name__)
 image_data = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
 
-# Use constructor-style init as shown in official docs
 capture = VideoCapture(
     f"video://localhost:{SENSOR_ID}",
     FRAME_RATE,

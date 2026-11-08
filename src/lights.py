@@ -16,7 +16,6 @@ Confirmed from lane_following example: [0,0,0,0,0,0,1,1] = headlights only.
 """
 import numpy as np
 
-# State constants (must match state_machine.py)
 STATE_IDLE        = 'IDLE'
 STATE_NAVIGATING  = 'NAVIGATING'
 STATE_AVOIDING    = 'AVOIDING'
@@ -25,7 +24,6 @@ STATE_STOPPED     = 'STOPPED'
 STATE_REVERSING   = 'REVERSING'
 STATE_ARRIVED     = 'ARRIVED'
 
-# Behaviour constants (from obstacle_detector.py)
 BEHAVIOUR_NAVIGATE       = 'NAVIGATE'
 BEHAVIOUR_WAIT           = 'WAIT'
 BEHAVIOUR_AVOID          = 'AVOID'
@@ -45,7 +43,7 @@ class LightController:
     def __init__(self):
         self._blink_state = False
         self._blink_tick  = 0
-        self._blink_rate  = 5   # toggle every N calls (~0.17s at 30Hz)
+        self._blink_rate  = 5
 
     def get_leds(self, state: str, avoid_side: str = 'left') -> np.ndarray:
         """
@@ -61,37 +59,30 @@ class LightController:
         blink = 1 if self._blink_state else 0
 
         if state == STATE_IDLE:
-            # All lights off
             leds = [0, 0, 0, 0,  0, 0,  0, 0]
 
         elif state == STATE_NAVIGATING:
-            # Headlights on, everything else off
             leds = [0, 0, 0, 0,  0, 0,  1, 1]
 
         elif state == STATE_AVOIDING:
-            # Headlights + indicator on avoidance side (blinking)
             if avoid_side == 'left':
                 leds = [blink, blink, 0, 0,  0, 0,  1, 1]
             else:
                 leds = [0, 0, blink, blink,  0, 0,  1, 1]
 
         elif state == STATE_WAITING:
-            # Headlights + both indicators blinking (hazard = waiting for person)
             leds = [blink, blink, blink, blink,  0, 0,  1, 1]
 
         elif state == STATE_STOPPED:
-            # Headlights + brake lights
             leds = [0, 0, 0, 0,  1, 0,  1, 1]
 
         elif state == STATE_REVERSING:
-            # Brake lights + both indicators blinking (reverse warning)
             if avoid_side == 'left':
                 leds = [blink, blink, 0, 0,  1, 0,  1, 1]
             else:
                 leds = [0, 0, blink, blink,  1, 0,  1, 1]
 
         elif state == STATE_ARRIVED:
-            # All lights off — mission complete
             leds = [0, 0, 0, 0,  0, 0,  0, 0]
 
         else:

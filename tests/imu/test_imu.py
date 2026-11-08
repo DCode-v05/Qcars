@@ -22,7 +22,7 @@ try:
         print(f"Accel (m/s²):  x={imu_buffer[3]:+.4f}  y={imu_buffer[4]:+.4f}  z={imu_buffer[5]:+.4f}")
         print(f"Temp  (°C):    {imu_buffer[6]:.2f}\n")
 
-        time.sleep(0.1)   # 10 Hz — adjust as needed
+        time.sleep(0.1)
 
 except HILError as e:
     print("HIL Error:", e.get_error_message())

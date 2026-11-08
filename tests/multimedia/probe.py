@@ -27,7 +27,6 @@ for sid in [0, 1, 2, 3]:
                      ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
                      ImageDataType.UINT8, [], 0)
             cap.start()
-            # try reading a frame
             for _ in range(100):
                 got = cap.read(img)
                 if got:

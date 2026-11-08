@@ -49,10 +49,10 @@ class Dashboard:
         self._lidar_data = None
         self._nav_data = None
         self._det_data = []
-        self._rs_rgb = None         # RealSense RGB frame
-        self._rs_depth_vis = None   # RealSense depth colorized
-        self._map_data = None       # occupancy grid points
-        self._path_data = None      # A* path + pose + goal
+        self._rs_rgb = None
+        self._rs_depth_vis = None
+        self._map_data = None
+        self._path_data = None
         self._data_lock = threading.Lock()
         self._setup_routes()
         self._thread = None
@@ -99,7 +99,6 @@ class Dashboard:
             if rs_depth_m is not None:
                 dm = np.squeeze(rs_depth_m)
                 if dm.ndim == 2:
-                    # Normalize depth to 0-255 for visualization (0-3m range)
                     d_clip = np.clip(dm, 0, 3.0)
                     d_norm = (d_clip / 3.0 * 255).astype(np.uint8)
                     self._rs_depth_vis = cv2.applyColorMap(d_norm, cv2.COLORMAP_JET)
@@ -125,7 +124,7 @@ class Dashboard:
         self._thread.start()
 
     def stop(self):
-        pass  # daemon thread dies with process
+        pass
 
     def _run(self):
         self._app.run(host="0.0.0.0", port=cfg.DASHBOARD_PORT,

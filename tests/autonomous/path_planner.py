@@ -15,9 +15,9 @@ class PathPlanner:
 
     def __init__(self, occupancy_grid):
         self._grid = occupancy_grid
-        self._path = []              # list of (wx, wy) world waypoints
+        self._path = []
         self._waypoint_idx = 0
-        self._goal = None            # (gx, gy) world coordinates
+        self._goal = None
         self._has_path = False
         self._last_replan = 0.0
 
@@ -39,7 +39,6 @@ class PathPlanner:
         px, py, _ = pose
         grid = self._grid
 
-        # Convert to grid coordinates
         sx, sy = grid._world_to_grid(px, py)
         gx, gy = grid._world_to_grid(self._goal[0], self._goal[1])
 
@@ -48,14 +47,11 @@ class PathPlanner:
             self._has_path = False
             return
 
-        # Get inflated binary grid
         obstacles = grid.get_binary_grid()
 
-        # A* search
         path_cells = self._astar(sx, sy, gx, gy, obstacles, n)
 
         if path_cells:
-            # Convert grid cells to world waypoints, simplify
             raw = [(grid._grid_to_world(cx, cy)) for cx, cy in path_cells]
             self._path = self._simplify_path(raw)
             self._waypoint_idx = 0
@@ -77,11 +73,8 @@ class PathPlanner:
             return None
 
         wx, wy = wp
-        # World heading to waypoint
         world_heading = math.atan2(wy - py, wx - px)
-        # Convert to car-relative
         rel_heading = world_heading - ptheta
-        # Wrap to [-pi, pi]
         while rel_heading > math.pi:
             rel_heading -= 2 * math.pi
         while rel_heading < -math.pi:
@@ -105,7 +98,6 @@ class PathPlanner:
             return True
         if not self._path:
             return True
-        # Check if any remaining path cells are now occupied
         for i in range(self._waypoint_idx, min(self._waypoint_idx + 10,
                                                 len(self._path))):
             wx, wy = self._path[i]
@@ -126,9 +118,6 @@ class PathPlanner:
     def goal(self):
         return self._goal
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  INTERNAL
-    # ══════════════════════════════════════════════════════════════════════
 
     def _get_lookahead_point(self, px, py):
         """Pure-pursuit: find point on path at lookahead distance ahead."""
@@ -138,7 +127,6 @@ class PathPlanner:
         lookahead = cfg.WAYPOINT_LOOKAHEAD_M
         reached = cfg.WAYPOINT_REACHED_M
 
-        # Advance past reached waypoints
         while self._waypoint_idx < len(self._path) - 1:
             wx, wy = self._path[self._waypoint_idx]
             d = math.sqrt((wx - px) ** 2 + (wy - py) ** 2)
@@ -147,7 +135,6 @@ class PathPlanner:
             else:
                 break
 
-        # Find the farthest waypoint within lookahead
         best = None
         for i in range(self._waypoint_idx, len(self._path)):
             wx, wy = self._path[i]
@@ -155,20 +142,18 @@ class PathPlanner:
             if d <= lookahead:
                 best = (wx, wy)
             else:
-                # Take this one if nothing closer was found
                 if best is None:
                     best = (wx, wy)
                 break
 
         if best is None and self._path:
-            best = self._path[-1]  # go to final waypoint
+            best = self._path[-1]
 
         return best
 
     def _astar(self, sx, sy, gx, gy, obstacles, n):
         """A* on 8-connected grid. Returns list of (gx, gy) cells or None."""
         if obstacles[sy, sx] or obstacles[gy, gx]:
-            # Start or goal is inside an obstacle — try to find nearest free cell
             if obstacles[gy, gx]:
                 gx, gy = self._nearest_free(gx, gy, obstacles, n)
                 if gx is None:
@@ -178,11 +163,9 @@ class PathPlanner:
                 if sx is None:
                     return None
 
-        # 8 directions: dx, dy, cost
         dirs = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
                 (-1, -1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (1, 1, 1.414)]
 
-        # Priority queue: (f_score, x, y)
         open_set = [(0.0, sx, sy)]
         g_score = {(sx, sy): 0.0}
         came_from = {}
@@ -198,7 +181,6 @@ class PathPlanner:
             nodes_explored += 1
 
             if cx == gx and cy == gy:
-                # Reconstruct path
                 path = [(cx, cy)]
                 while (cx, cy) in came_from:
                     cx, cy = came_from[(cx, cy)]
@@ -218,13 +200,12 @@ class PathPlanner:
                 new_g = g_score[(cx, cy)] + cost
                 if new_g < g_score.get((nx, ny), float('inf')):
                     g_score[(nx, ny)] = new_g
-                    # Euclidean heuristic
                     h = math.sqrt((nx - gx) ** 2 + (ny - gy) ** 2)
                     f = new_g + h
                     came_from[(nx, ny)] = (cx, cy)
                     heapq.heappush(open_set, (f, nx, ny))
 
-        return None  # no path found
+        return None
 
     def _nearest_free(self, gx, gy, obstacles, n):
         """Find nearest free cell to (gx, gy)."""
@@ -246,9 +227,8 @@ class PathPlanner:
             x0, y0 = simplified[-1]
             x1, y1 = path[i]
             x2, y2 = path[i + 1]
-            # Check if collinear (cross product ~= 0)
             cross = abs((x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0))
-            if cross > 0.001:  # not collinear — keep
+            if cross > 0.001:
                 simplified.append(path[i])
         simplified.append(path[-1])
         return simplified

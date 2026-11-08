@@ -1,6 +1,3 @@
-# Official Quanser QCar2 LiDAR test (headless/SSH version)
-# Based on: QCar2_hardware_test_rp_lidar_a2.py
-
 import sys
 sys.path.insert(0, '/home/nvidia/Documents/Quanser/libraries/python')
 
@@ -10,10 +7,9 @@ from pal.products.qcar import QCarLidar
 
 print("=== Quanser QCar2 Official LiDAR Test ===\n")
 
-# Official settings from Quanser hardware test
 numMeasurements      = 1000
-lidarMeasurementMode = 2   # Long range
-lidarInterpolationMode = 0 # Normal
+lidarMeasurementMode = 2
+lidarInterpolationMode = 0
 
 print("Initializing QCarLidar...")
 myLidar = QCarLidar(
@@ -23,7 +19,7 @@ myLidar = QCarLidar(
 )
 print("✅ LiDAR initialized!\n")
 
-runTime = 10.0  # seconds
+runTime = 10.0
 t0 = time.time()
 scan_count = 0
 
@@ -56,5 +52,4 @@ finally:
     myLidar.terminate()
     print(f"\n✅ Done. Total scans: {scan_count}")
     print("LiDAR terminated cleanly.")
-
 

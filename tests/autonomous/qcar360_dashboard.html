@@ -5,8 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QCar 2 · 360° Perception</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+<style>  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
 
   :root {
     --bg:       #080c0f;
@@ -38,7 +37,6 @@
     overflow: hidden;
   }
 
-  /* ── HEADER ── */
   header {
     grid-column: 1 / -1;
     background: var(--panel);
@@ -84,7 +82,6 @@
     letter-spacing: 1px;
   }
 
-  /* ── CAMERA GRID (top-left) ── */
   #cam-grid {
     grid-row: 2;
     grid-column: 1;
@@ -136,7 +133,6 @@
   }
   .cam-det-count.has-det { display: block; }
 
-  /* ── RADAR (top-right) ── */
   #radar-panel {
     grid-row: 2;
     grid-column: 2;
@@ -176,7 +172,6 @@
   }
   .cl-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 
-  /* ── PANORAMA STRIP ── */
   #pano-panel {
     grid-row: 3;
     grid-column: 1 / -1;
@@ -201,7 +196,6 @@
     border: 1px solid var(--dim);
   }
 
-  /* ── DETECTION TABLE ── */
   #det-panel {
     grid-row: 4;
     grid-column: 1 / -1;
@@ -293,7 +287,6 @@
     border-radius: 2px;
   }
 
-  /* ── SCANLINE OVERLAY ── */
   body::after {
     content: '';
     position: fixed;
@@ -309,7 +302,6 @@
     z-index: 9999;
   }
 
-  /* scrollbar */
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 2px; }
@@ -317,7 +309,6 @@
 </head>
 <body>
 
-<!-- HEADER -->
 <header>
   <h1>QCAR&nbsp;2&nbsp;·&nbsp;360°&nbsp;PERCEPTION</h1>
   <div class="hdr-sep"></div>
@@ -334,7 +325,6 @@
   </div>
 </header>
 
-<!-- CAMERA GRID -->
 <div id="cam-grid">
   <div class="cam-cell" id="cell-0">
     <img id="cam0" alt="CAM 0">
@@ -362,20 +352,17 @@
   </div>
 </div>
 
-<!-- RADAR -->
 <div id="radar-panel">
   <h2>QCAR BIRD'S EYE · 360°</h2>
   <canvas id="radar-canvas" width="300" height="300"></canvas>
   <div id="compass-legend"></div>
 </div>
 
-<!-- PANORAMA STRIP -->
 <div id="pano-panel">
   <h3>PANORAMA STRIP · RIGHT → BACK → FRONT → LEFT</h3>
   <img id="pano-img" alt="panorama">
 </div>
 
-<!-- DETECTION TABLE -->
 <div id="det-panel">
   <div id="det-header">
     <h3>DETECTION LOG · WORLD ANGLES</h3>
@@ -400,30 +387,20 @@
 </div>
 
 <script>
-// ═══════════════════════════════════════════════════════════════
-// CONFIG (must match server)
-// ═══════════════════════════════════════════════════════════════
-const H_FOV      = 160;     // degrees per camera
+const H_FOV      = 160;
 const CAM_CENTRES = [0, 90, 180, 270];
 const CAM_NAMES   = ["FRONT", "RIGHT", "BACK", "LEFT"];
 
-// Class → pastel colour map (HSL spread)
 function classColour(id) {
   const h = (id * 137.508) % 360;
   return `hsl(${h},80%,65%)`;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// CLOCK
-// ═══════════════════════════════════════════════════════════════
 setInterval(() => {
   document.getElementById("time-badge").textContent =
     new Date().toLocaleTimeString("en-GB");
 }, 1000);
 
-// ═══════════════════════════════════════════════════════════════
-// FPS counter
-// ═══════════════════════════════════════════════════════════════
 let _frameTimes = [];
 function tickFPS() {
   const now = performance.now();
@@ -433,26 +410,22 @@ function tickFPS() {
   document.getElementById("fps-badge").textContent = fps + " FPS";
 }
 
-// ═══════════════════════════════════════════════════════════════
-// BIRD'S EYE CANVAS — LiDAR + YOLO + best path
-// ═══════════════════════════════════════════════════════════════
 const RC     = document.getElementById("radar-canvas");
 const RCX    = RC.getContext("2d");
 const R_SIZE = RC.width;
 const R_CX   = R_SIZE / 2;
 const R_CY   = R_SIZE / 2;
 const R_RMAX = R_SIZE / 2 - 10;
-const LIDAR_MAX_M = 4.0;  // max range for scaling
+const LIDAR_MAX_M = 4.0;
 
 let _detections = [];
-let _lidarPts   = [];     // [{d, a}, ...]
-let _navData    = {};     // best path, zone, state
+let _lidarPts   = [];
+let _navData    = {};
 
 function drawBirdEye() {
   const ctx = RCX;
   ctx.clearRect(0, 0, R_SIZE, R_SIZE);
 
-  // ── Range rings with distance labels ──
   ctx.strokeStyle = "#1a2a1a";
   ctx.lineWidth = 1;
   ctx.font = "8px 'Share Tech Mono'";
@@ -465,10 +438,8 @@ function drawBirdEye() {
     ctx.fillText((r * LIDAR_MAX_M / 4).toFixed(1) + "m", R_CX + 3, R_CY - rr + 10);
   }
 
-  // ── Car heading (from IMU gyroscope integration) ──
-  const heading = _navData.heading_rad || 0;  // radians, positive = turned left
+  const heading = _navData.heading_rad || 0;
 
-  // ── Cardinal labels (rotate with heading — world-fixed) ──
   const cardinals = [
     { label: "N", angle: -Math.PI/2 - heading },
     { label: "E", angle: 0 - heading },
@@ -485,7 +456,6 @@ function drawBirdEye() {
   }
   ctx.textAlign = "left";
 
-  // ── Cardinal spokes (rotate with heading) ──
   for (let i = 0; i < 4; i++) {
     const a = (i * 90) * Math.PI / 180 - Math.PI / 2 - heading;
     ctx.beginPath();
@@ -496,14 +466,12 @@ function drawBirdEye() {
     ctx.stroke();
   }
 
-  // ── Car direction indicator (always points up = car's front) ──
   ctx.font = "bold 9px 'Share Tech Mono'";
   ctx.fillStyle = "#00ff88";
   ctx.textAlign = "center";
   ctx.fillText("▲ FRONT", R_CX, R_CY - R_RMAX - 2);
   ctx.textAlign = "left";
 
-  // ── Zone rings (STOP=red, WARN=amber, CLEAR=dim) ──
   const stopR  = (0.4 / LIDAR_MAX_M) * R_RMAX;
   const warnR  = (1.5 / LIDAR_MAX_M) * R_RMAX;
   ctx.beginPath();
@@ -517,17 +485,14 @@ function drawBirdEye() {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // ── Rotate canvas so world stays fixed, car rotates ──
-  // LiDAR/YOLO/path are in car-frame; rotate by -heading to show world-fixed view
   ctx.save();
   ctx.translate(R_CX, R_CY);
   ctx.rotate(-heading);
   ctx.translate(-R_CX, -R_CY);
 
-  // ── LiDAR point cloud (obstacles) ──
   for (const pt of _lidarPts) {
     const r = Math.min(pt.d / LIDAR_MAX_M, 1.0) * R_RMAX;
-    const a = pt.a - Math.PI / 2;  // rotate so 0=up
+    const a = pt.a - Math.PI / 2;
     const x = R_CX + Math.cos(a) * r;
     const y = R_CY + Math.sin(a) * r;
     let col;
@@ -540,7 +505,6 @@ function drawBirdEye() {
     ctx.fill();
   }
 
-  // ── YOLO detection arcs ──
   for (const d of _detections) {
     const aL = (d.angle_left  - 90) * Math.PI / 180;
     const aR = (d.angle_right - 90) * Math.PI / 180;
@@ -554,7 +518,6 @@ function drawBirdEye() {
     ctx.strokeStyle = col;
     ctx.lineWidth = 2;
     ctx.stroke();
-    // Label
     const aC = (d.angle_centre - 90) * Math.PI / 180;
     const lx = R_CX + Math.cos(aC) * R_RMAX * 0.58;
     const ly = R_CY + Math.sin(aC) * R_RMAX * 0.58;
@@ -568,7 +531,6 @@ function drawBirdEye() {
     ctx.textAlign = "left";
   }
 
-  // ── Best path arrow ──
   if (_navData.has_path) {
     const pa = _navData.best_path_angle - Math.PI / 2;
     const pathR = R_RMAX * 0.7;
@@ -600,7 +562,6 @@ function drawBirdEye() {
     ctx.textAlign = "left";
   }
 
-  // ── QCar body (rotates with car) ──
   ctx.beginPath();
   ctx.arc(R_CX, R_CY, 8, 0, Math.PI * 2);
   ctx.fillStyle = "#00ff88";
@@ -613,9 +574,8 @@ function drawBirdEye() {
   ctx.fillStyle = "#00ff88";
   ctx.fill();
 
-  ctx.restore();  // undo heading rotation
+  ctx.restore();
 
-  // ── Status bar at bottom ──
   if (_navData.state) {
     const zoneCols = {CLEAR:"#00cc66", WARN:"#ffaa00", STOP:"#ff3344"};
     const hdg = ((heading * 180 / Math.PI) % 360 + 360) % 360;
@@ -630,7 +590,6 @@ function drawBirdEye() {
   }
 }
 
-// ── Animation loop ──
 function animateBirdEye(ts) {
   drawBirdEye();
   tickFPS();
@@ -638,15 +597,11 @@ function animateBirdEye(ts) {
 }
 requestAnimationFrame(animateBirdEye);
 
-// ── Poll LiDAR + nav data ──
 setInterval(() => {
   fetch("/lidar").then(r => r.json()).then(d => { _lidarPts = d.points || []; }).catch(() => {});
   fetch("/nav").then(r => r.json()).then(d => { _navData = d; }).catch(() => {});
-}, 200);  // 5Hz
+}, 200);
 
-// ═══════════════════════════════════════════════════════════════
-// DETECTION TABLE
-// ═══════════════════════════════════════════════════════════════
 function updateTable(dets) {
   const tbody = document.getElementById("det-tbody");
   tbody.innerHTML = "";
@@ -674,7 +629,6 @@ function updateTable(dets) {
     const conf  = (d.confidence * 100).toFixed(0);
     const barW  = Math.round(d.confidence * 60);
 
-    // Arc visualiser bar positions (0–360 → 0–100%)
     const pL = (d.angle_left  / 360 * 100).toFixed(1);
     const pW = (parseFloat(span) / 360 * 100).toFixed(1);
 
@@ -699,9 +653,6 @@ function updateTable(dets) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// COMPASS LEGEND (class colours)
-// ═══════════════════════════════════════════════════════════════
 function updateLegend(dets) {
   const seen = {};
   dets.forEach(d => { seen[d.class_id] = {name: d.class_name, col: classColour(d.class_id)}; });
@@ -716,9 +667,6 @@ function updateLegend(dets) {
   });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SOCKET.IO  (limit reconnection attempts to avoid reload storm)
-// ═══════════════════════════════════════════════════════════════
 const socket = io({
   reconnectionDelay: 2000,
   reconnectionDelayMax: 10000,
@@ -736,7 +684,6 @@ socket.on("detections", (data) => {
   updateLegend(dets);
 });
 
-// Also poll detections via REST (SocketIO may not be connected)
 setInterval(() => {
   fetch("/detections").then(r => r.json()).then(d => {
     const dets = d.detections || [];
@@ -750,10 +697,7 @@ socket.on("disconnect", () => {
   console.warn("[SocketIO] disconnected — will retry automatically");
 });
 
-// ═══════════════════════════════════════════════════════════════
-// Snapshot polling (replaces MJPEG — no persistent connections)
-// ═══════════════════════════════════════════════════════════════
-const POLL_MS = 125;  // ~8 fps
+const POLL_MS = 125;
 
 function pollSnapshot(img, url) {
   let busy = false;

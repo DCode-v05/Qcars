@@ -50,7 +50,6 @@ class Detection:
         self.angle_right = px_to_world_angle(bx + bw, fw, centre_deg)
         self.angle_centre = px_to_world_angle(bx + bw / 2, fw, centre_deg)
 
-        # Categorize object type
         if cls_id in cfg.PERSON_IDS:
             self.obj_type = 'PERSON'
         elif cls_id in cfg.MOVING_IDS:
@@ -79,7 +78,7 @@ class YOLOProcessor:
     def __init__(self, model_path, cam_queues, stores=None):
         self.model_path = model_path
         self.cam_queues = cam_queues
-        self.stores     = stores       # optional CamStore list for dashboard
+        self.stores     = stores
         self._model     = None
         self._dets      = [[] for _ in cfg.CAMERA_CONFIG]
         self._lock      = threading.Lock()
@@ -163,7 +162,6 @@ class YOLOProcessor:
                 except queue.Empty:
                     continue
 
-                # Show raw frame immediately on dashboard
                 if self.stores and idx < len(self.stores):
                     self.stores[cam["id"]].put_raw(frame)
                     self.stores[cam["id"]].put_annotated(frame)
@@ -178,7 +176,6 @@ class YOLOProcessor:
                     logging.info(f"[YOLO] first inference done in {time.time()-t0:.1f}s")
                     first = False
 
-                # Build Detection objects
                 fw = frame.shape[1]
                 dets = []
                 for cls_id, conf, bx, by, bw, bh in raw_boxes:
@@ -191,7 +188,6 @@ class YOLOProcessor:
                         bx, by, bw, bh, fw, cam["centre_deg"]
                     ))
 
-                # Update annotated frame for dashboard
                 if self.stores:
                     annotated = self._annotate(frame, dets)
                     self.stores[cam["id"]].put_annotated(annotated)

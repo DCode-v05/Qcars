@@ -15,7 +15,7 @@ Run: python3 lidar_3d.py
 
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')              # headless — no display needed
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import time
@@ -25,10 +25,6 @@ from quanser.devices import RPLIDAR, RangingMeasurements
 from quanser.devices.enumerations import RangingDistance, RangingMeasurementMode
 from quanser.devices.exceptions import DeviceError
 
-# ══════════════════════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════════════════════
-# QCar 2 LiDAR serial URI — UART1 connector J26
 LIDAR_URI = (
     "serial-cpu://localhost:1"
     "?baud='115200'"
@@ -39,26 +35,20 @@ LIDAR_URI = (
     ",dsr='on'"
 )
 
-# 720 measurements = one reading every 0.5 degrees (360/720)
 NUM_MEASUREMENTS  = 720
 
-# How many full scans to collect for the 3D surface
-NUM_SCANS         = 30             # 30 scans = Z depth of surface
+NUM_SCANS         = 30
 
-# Ranging mode
-RANGING_DISTANCE  = RangingDistance.LONG    # 28m range
+RANGING_DISTANCE  = RangingDistance.LONG
 RANGING_MODE      = RangingMeasurementMode.INTERPOLATED
 
-# Interpolation limits
-MAX_INTERP_DIST   = 0.05           # max 5cm gap to interpolate
-MAX_INTERP_ANGLE  = 0.1            # max 0.1 rad gap to interpolate
+MAX_INTERP_DIST   = 0.05
+MAX_INTERP_ANGLE  = 0.1
 
-# Valid distance filter (ignore beyond 20m or below 0.1m)
 MIN_DIST_M        = 0.10
 MAX_DIST_M        = 20.0
 
 OUTPUT_DIR        = "lidar_output"
-# ══════════════════════════════════════════════════════════════
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -82,7 +72,6 @@ def polar_to_cartesian(headings_rad, distances_m):
 
 def save_2d_scan(headings, distances, quality, scan_num, output_dir):
     """Save a single 2D polar scan as a top-down map."""
-    # Filter valid points (quality > 0 and distance in range)
     valid = (quality > 0) & (distances > MIN_DIST_M) & (distances < MAX_DIST_M)
     h_valid = headings[valid]
     d_valid = distances[valid]
@@ -99,7 +88,6 @@ def save_2d_scan(headings, distances, quality, scan_num, output_dir):
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
 
-    # Mark LiDAR centre
     ax.plot(0, 0, 'r*', markersize=15, label='LiDAR')
     ax.legend()
 
@@ -120,21 +108,16 @@ def save_3d_surface(all_distances, all_headings, all_quality, output_dir):
     """
     print("\n── Building 3D Surface ───────────────────────────────")
 
-    # Stack all scans into arrays
-    # Shape: (NUM_SCANS, NUM_MEASUREMENTS)
-    dist_arr    = np.array(all_distances)    # shape (S, N)
-    head_arr    = np.array(all_headings)     # shape (S, N)
-    qual_arr    = np.array(all_quality)      # shape (S, N)
+    dist_arr    = np.array(all_distances)
+    head_arr    = np.array(all_headings)
+    qual_arr    = np.array(all_quality)
 
-    # Filter invalid readings → set to NaN
     invalid = (qual_arr == 0) | (dist_arr < MIN_DIST_M) | (dist_arr > MAX_DIST_M)
     dist_arr[invalid] = np.nan
 
-    # Convert to Cartesian
-    x_arr = dist_arr * np.cos(head_arr)   # shape (S, N)
-    y_arr = dist_arr * np.sin(head_arr)   # shape (S, N)
+    x_arr = dist_arr * np.cos(head_arr)
+    y_arr = dist_arr * np.sin(head_arr)
 
-    # Z axis = scan index (time)
     z_arr = np.zeros_like(x_arr)
     for i in range(len(all_distances)):
         z_arr[i, :] = i
@@ -144,7 +127,6 @@ def save_3d_surface(all_distances, all_headings, all_quality, output_dir):
     print(f"  Valid pts   : {(~invalid).sum()}")
     print(f"  Dist range  : {np.nanmin(dist_arr):.2f}m – {np.nanmax(dist_arr):.2f}m")
 
-    # ── Plot 1: 3D Scatter (all valid points) ─────────────────
     fig = plt.figure(figsize=(14, 10))
 
     ax1 = fig.add_subplot(121, projection='3d')
@@ -164,7 +146,6 @@ def save_3d_surface(all_distances, all_headings, all_quality, output_dir):
     ax1.set_title(f'QCar 2 LiDAR — 3D Scatter\n'
                   f'{(~invalid).sum()} valid points from {NUM_SCANS} scans')
 
-    # ── Plot 2: Top-down 2D density map ───────────────────────
     ax2 = fig.add_subplot(122)
     all_x = x_arr[mask]
     all_y = y_arr[mask]
@@ -191,7 +172,6 @@ def save_3d_surface(all_distances, all_headings, all_quality, output_dir):
     plt.close()
     print(f"  ✅ Saved: {path_3d}")
 
-    # ── Plot 3: Individual scan rings as 3D rings ─────────────
     fig2 = plt.figure(figsize=(12, 8))
     ax3  = fig2.add_subplot(111, projection='3d')
 
@@ -243,12 +223,10 @@ def main():
     print(f"  Ranging mode   : INTERPOLATED, LONG range (28m)")
     print("═" * 55)
 
-    # ── Step 1: Create measurement buffer ─────────────────────
     print("\n[1/4] Allocating measurement buffer ...")
     measurements = RangingMeasurements(NUM_MEASUREMENTS)
     print(f"      ✅ Buffer: {NUM_MEASUREMENTS} measurements")
 
-    # ── Step 2: Open LiDAR ────────────────────────────────────
     print("\n[2/4] Opening RPLIDAR ...")
     lidar = RPLIDAR()
     try:
@@ -264,13 +242,11 @@ def main():
         print("  - Try URI with localhost:1 instead of localhost:2")
         return
 
-    # Storage for all scans
     all_distances = []
     all_headings  = []
     all_quality   = []
 
     try:
-        # ── Step 3: Read scans ────────────────────────────────
         print(f"\n[3/4] Reading {NUM_SCANS} scans ...")
         print(f"      (Rotating LiDAR — keep environment still)\n")
         print(f"  {'Scan':>5}  {'Valid':>6}  {'Min(m)':>7}  "
@@ -284,7 +260,6 @@ def main():
         while scan_count < NUM_SCANS:
             t0 = time.time()
 
-            # read() returns number of valid measurements
             n_valid = lidar.read(
                 RANGING_MODE,
                 MAX_INTERP_DIST,
@@ -302,7 +277,6 @@ def main():
 
             empty_count = 0
 
-            # Extract data from measurements buffer
             distances = np.array([measurements.distance[i]
                                    for i in range(NUM_MEASUREMENTS)])
             headings  = np.array([measurements.heading[i]
@@ -310,14 +284,12 @@ def main():
             quality   = np.array([measurements.quality[i]
                                    for i in range(NUM_MEASUREMENTS)])
 
-            # Store scan
             all_distances.append(distances.copy())
             all_headings.append(headings.copy())
             all_quality.append(quality.copy())
 
             scan_count += 1
 
-            # Stats for this scan
             valid_mask = (quality > 0) & (distances > MIN_DIST_M) & \
                          (distances < MAX_DIST_M)
             n_good  = valid_mask.sum()
@@ -335,7 +307,6 @@ def main():
                       f"{'---':>7}  {'---':>7}  {'---':>8}  "
                       f"{elapsed:>8.2f}")
 
-            # Save first scan as 2D image immediately
             if scan_count == 1:
                 path = save_2d_scan(headings, distances, quality,
                                     scan_count, OUTPUT_DIR)
@@ -351,7 +322,6 @@ def main():
         lidar.close()
         print("\n✅ LiDAR closed")
 
-    # ── Step 4: Generate 3D surface plots ─────────────────────
     if len(all_distances) < 2:
         print("\n❌ Not enough scans for 3D surface")
         return
@@ -360,7 +330,6 @@ def main():
     save_3d_surface(all_distances, all_headings, all_quality, OUTPUT_DIR)
     save_raw_data(all_distances, all_headings, all_quality, OUTPUT_DIR)
 
-    # Final summary
     total_time = time.time() - start_time
     print(f"\n{'═'*55}")
     print(f"  Scans collected : {len(all_distances)}")

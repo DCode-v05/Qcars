@@ -23,8 +23,8 @@ class EstimationConfig:
     INITIAL_COVARIANCE = np.eye(3) * 0.01
     Q_x     = 0.01
     Q_y     = 0.01
-    Q_theta = 0.005       # tighter — gyro gives good heading
-    R_x     = 0.10        # measurement noise (for correction step)
+    Q_theta = 0.005
+    R_x     = 0.10
     R_y     = 0.10
     R_theta = 0.05
 
@@ -35,8 +35,8 @@ def _predict_f(x_hat, u, dt):
     u = [v_wheel_mps, gyro_z_corrected_rad_s]
     """
     x, y, theta = float(x_hat[0]), float(x_hat[1]), float(x_hat[2])
-    v     = float(u[0])     # wheel speed in m/s (from encoder)
-    omega = float(u[1])     # heading rate in rad/s (from gyroscope, bias-corrected)
+    v     = float(u[0])
+    omega = float(u[1])
 
     x_new     = x     + v * np.cos(theta) * dt
     y_new     = y     + v * np.sin(theta) * dt
@@ -133,8 +133,6 @@ class PoseEstimator:
         self._last_encoder = current
         return float(delta / dt) * CPS_TO_MPS
 
-
-# ── Standalone test ───────────────────────────────────────────────────────────
 
 def main():
     from perception import SensorManager, Config as PerceptionConfig

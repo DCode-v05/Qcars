@@ -20,17 +20,12 @@ import cv2
 from quanser.multimedia import VideoCapture, ImageFormat, ImageDataType
 from quanser.multimedia.exceptions import MediaError
 
-# ══════════════════════════════════════════════════════════════
-# CONFIG — IMX219 native Mode 3 (confirmed from your GStreamer)
-# ══════════════════════════════════════════════════════════════
 FRAME_WIDTH  = 820
 FRAME_HEIGHT = 410
 FRAME_RATE   = 120.0
-FRAMES_TO_READ = 30        # frames per camera test (~0.25s at 120fps)
+FRAMES_TO_READ = 30
 
-# All 4 confirmed CSI sensors on QCar 2
 CSI_SENSORS = [0, 1, 2, 3]
-# ══════════════════════════════════════════════════════════════
 
 
 def test_camera(sensor_id: int) -> bool:
@@ -43,7 +38,6 @@ def test_camera(sensor_id: int) -> bool:
     Returns True if test passed, False if failed.
     """
 
-    # URL format from docs: "video://localhost:id"
     url = f"video://localhost:{sensor_id}"
 
     print(f"\n{'─'*50}")
@@ -53,46 +47,37 @@ def test_camera(sensor_id: int) -> bool:
     print(f"  Frames to read   : {FRAMES_TO_READ}")
     print(f"{'─'*50}")
 
-    # Step 1 — Allocate image buffer
-    # Shape must be (H, W, 3) for ROW_MAJOR_INTERLEAVED_BGR + UINT8
     image_data = np.zeros(
         (FRAME_HEIGHT, FRAME_WIDTH, 3),
         dtype=np.uint8
     )
     print(f"  [1/5] Buffer allocated : shape={image_data.shape}, dtype={image_data.dtype}")
 
-    # Step 2 — Construct VideoCapture object (no connection yet)
     capture = VideoCapture()
     print(f"  [2/5] VideoCapture()   : object created")
 
     try:
-        # Step 3 — open(): connect to the camera
         capture.open(
-            url,                                   # video://localhost:N
-            FRAME_RATE,                            # float
-            FRAME_WIDTH,                           # int
-            FRAME_HEIGHT,                          # int
-            ImageFormat.ROW_MAJOR_INTERLEAVED_BGR, # BGR, OpenCV-compatible
-            ImageDataType.UINT8,                   # 8-bit per channel
-            None,                                  # no extra attributes
-            0                                      # num_attributes = 0
+            url,
+            FRAME_RATE,
+            FRAME_WIDTH,
+            FRAME_HEIGHT,
+            ImageFormat.ROW_MAJOR_INTERLEAVED_BGR,
+            ImageDataType.UINT8,
+            None,
+            0
         )
         print(f"  [3/5] open()           : ✅ connected to {url}")
 
-        # Step 4 — start(): begin streaming frames
         capture.start()
         print(f"  [4/5] start()          : ✅ streaming started")
 
-        # Step 5 — read() loop
         print(f"  [5/5] read() loop      : reading {FRAMES_TO_READ} frames...")
 
         frames_got  = 0
         frames_miss = 0
 
         while frames_got < FRAMES_TO_READ:
-            # read() → True  : new frame written into image_data
-            # read() → False : no new frame yet, poll again
-            # read() → raises MediaError on hardware failure
             got = capture.read(image_data)
 
             if got:
@@ -100,31 +85,26 @@ def test_camera(sensor_id: int) -> bool:
             else:
                 frames_miss += 1
 
-        # Report frame stats
         print(f"         frames received : {frames_got}")
         print(f"         missed polls    : {frames_miss}")
         print(f"         last frame mean : {image_data.mean():.2f}  "
               f"(0=black, 127=mid, 255=white)")
 
-        # Save snapshot to verify actual image content
         snapshot = f"snapshot_sensor{sensor_id}.jpg"
         cv2.imwrite(snapshot, image_data)
         print(f"         snapshot saved  : {snapshot}")
 
-        return True   # Test passed
+        return True
 
     except MediaError as e:
-        # get_error_message() gives the detailed Quanser error string
         print(f"\n  ❌ MediaError: {e.get_error_message()}")
         print(f"     Possible causes:")
         print(f"       - Wrong resolution (try 1640x820)")
         print(f"       - sensor-id={sensor_id} not physically connected")
         print(f"       - Another process is using this camera")
-        return False  # Test failed
+        return False
 
     finally:
-        # Always stop() then close() — even if read() failed
-        # stop() before close() is mandatory per the docs lifecycle
 
         try:
             capture.stop()
@@ -148,12 +128,10 @@ def main():
 
     results = {}
 
-    # Test each sensor one by one — sequentially
     for sensor_id in CSI_SENSORS:
         passed = test_camera(sensor_id)
         results[sensor_id] = passed
 
-    # Final summary
     print(f"\n{'═'*50}")
     print("  FINAL RESULTS")
     print(f"{'═'*50}")

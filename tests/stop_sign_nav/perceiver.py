@@ -56,34 +56,24 @@ from pit.YOLO.nets import YOLOv8
 from perception import SensorManager, Config as PerceptionConfig
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  COCO CLASS CATEGORISATION
-# ═════════════════════════════════════════════════════════════════════════════
+PERSON_CLASS_IDS = [0]
 
-# Classes where car STOPS and WAITS (entity will move on its own)
-PERSON_CLASS_IDS = [0]                      # person
+MOVING_CLASS_IDS = [1, 2, 3, 16]
 
-# Classes where car STOPS and WAITS (unpredictable movement)
-MOVING_CLASS_IDS = [1, 2, 3, 16]           # bicycle, car, motorcycle, dog
-
-# Classes where car STEERS AROUND (won't move by themselves)
 STATIC_CLASS_IDS = [
-    24, 25, 26, 28,                         # backpack, umbrella, handbag, suitcase
-    32, 39, 41, 43, 44, 45,                 # sports ball, bottle, cup, knife, spoon, bowl
-    56, 57, 58, 59, 60,                     # chair, couch, plant, bed, table
-    62, 63, 67, 73, 74, 76, 79,             # tv, laptop, phone, book, clock, scissors, toothbrush
+    24, 25, 26, 28,
+    32, 39, 41, 43, 44, 45,
+    56, 57, 58, 59, 60,
+    62, 63, 67, 73, 74, 76, 79,
 ]
 
-# All classes we ask YOLO to detect (ignore everything else)
 ALL_MONITORED_CLASSES = PERSON_CLASS_IDS + MOVING_CLASS_IDS + STATIC_CLASS_IDS
 
-# Human-readable category strings
 OBJ_PERSON = 'PERSON'
 OBJ_MOVING = 'MOVING'
 OBJ_STATIC = 'STATIC'
 OBJ_NONE   = 'NONE'
 
-# COCO class names for display (subset)
 COCO_NAMES = {
     0:'person', 1:'bicycle', 2:'car', 3:'motorcycle', 16:'dog',
     24:'backpack', 25:'umbrella', 26:'handbag', 28:'suitcase',
@@ -105,70 +95,42 @@ def classify_class_id(class_id: int) -> str:
     return OBJ_NONE
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  CONFIG
-# ═════════════════════════════════════════════════════════════════════════════
-
 class PerceiverConfig:
 
     IMAGE_WIDTH       = 640
     IMAGE_HEIGHT      = 480
-    CSI_CAMERA_ID     = '2'   # front camera on this QCar is index 2
+    CSI_CAMERA_ID     = '2'
 
-    # Detection confidence threshold (0–1). Lower = more detections but more
-    # false positives. 0.35 is a good balance for indoor use.
     CONFIDENCE        = 0.35
 
-    # NOTE: update PerceptionConfig.CSI_CAMERA_IDS = ["2"] in perception.py
-    # OR override here - the standalone test will set it
 
-    # Only report detections in the FORWARD region of the frame.
-    # Objects at the extreme sides are not in our path.
-    # Column range: centre ± FORWARD_COL_MARGIN pixels.
-    # At 640px wide, centre=320. ±200 covers the full relevant path width.
     FORWARD_COL_CENTRE = 320
-    FORWARD_COL_MARGIN = 200   # detections outside 120-520px are ignored
+    FORWARD_COL_MARGIN = 200
 
-    # Maximum distance to report as an obstacle (metres).
-    # Objects further than this are not yet a concern.
     MAX_OBSTACLE_DIST_M = 3.0
 
-    # Minimum mask pixel count to trust a detection (filters tiny blips)
     MIN_MASK_PIXELS   = 200
 
-    # Model path — None = use default (downloads automatically if missing)
     MODEL_PATH        = None
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  PERCEPTION RESULT  —  returned every tick
-# ═════════════════════════════════════════════════════════════════════════════
-
 def _empty_perception() -> dict:
     return {
-        # Nearest threat in the forward region
-        'nearest_type':     OBJ_NONE,    # PERSON / MOVING / STATIC / NONE
-        'nearest_name':     '',          # COCO class name e.g. 'person'
-        'nearest_dist_m':   99.0,        # metres (from depth camera)
-        'nearest_conf':     0.0,         # YOLO confidence 0–1
-        'nearest_x':        0,           # bounding box top-left x (pixels)
-        'nearest_y':        0,           # bounding box top-left y (pixels)
+        'nearest_type':     OBJ_NONE,
+        'nearest_name':     '',
+        'nearest_dist_m':   99.0,
+        'nearest_conf':     0.0,
+        'nearest_x':        0,
+        'nearest_y':        0,
 
-        # All detections in frame (for dashboard)
-        'all_detections':   [],          # list of dicts
+        'all_detections':   [],
 
-        # Annotated frame for dashboard
-        'annotated_frame':  None,        # ndarray (H,W,3) uint8 BGR or None
+        'annotated_frame':  None,
 
-        # Performance
         'yolo_fps':         0.0,
         'n_detections':     0,
     }
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  PERCEIVER
-# ═════════════════════════════════════════════════════════════════════════════
 
 class Perceiver:
     """
@@ -228,10 +190,8 @@ class Perceiver:
             return result
 
         try:
-            # Step 1: pre-process (resize to model input size)
             img = self._yolo.pre_process(bgr_frame)
 
-            # Step 2: YOLO inference — filter to our monitored classes only
             self._yolo.predict(
                 img,
                 classes    = ALL_MONITORED_CLASSES,
@@ -244,27 +204,22 @@ class Perceiver:
             result['n_detections'] = n
 
             if n == 0:
-                # No detections — still render clean frame
                 result['annotated_frame'] = img.copy()
                 return result
 
-            # Step 3: post-processing with depth
-            # depth_frame is (H,W,1) float32 metres — squeeze to (H,W)
-            # YOLO post_processing expects depth as (H,W,1) or None
-            depth_for_yolo = depth_frame  # already (H,W,1) float32
+            depth_for_yolo = depth_frame
 
             detections = self._yolo.post_processing(
                 alignedDepth    = depth_for_yolo,
                 clippingDistance= self.cfg.MAX_OBSTACLE_DIST_M,
             )
 
-            # Step 4: classify and filter detections
             all_dets   = []
             nearest    = None
             nearest_d  = 99.0
 
             pred0      = self._yolo.predictions[0]
-            class_ids  = self._yolo.objectsDetected   # numpy array
+            class_ids  = self._yolo.objectsDetected
 
             for i, obs in enumerate(detections):
                 cid      = int(class_ids[i])
@@ -273,11 +228,9 @@ class Perceiver:
                 conf     = float(pred0.boxes.conf.cpu().numpy()[i])
                 cx       = int(obs.x)
 
-                # Filter: only forward region
                 if abs(cx - self.cfg.FORWARD_COL_CENTRE) > self.cfg.FORWARD_COL_MARGIN:
                     continue
 
-                # Filter: only within max distance
                 if dist_m > self.cfg.MAX_OBSTACLE_DIST_M:
                     continue
 
@@ -292,7 +245,6 @@ class Perceiver:
                 }
                 all_dets.append(det)
 
-                # Track the nearest threatening object
                 if dist_m < nearest_d:
                     nearest_d = dist_m
                     nearest   = det
@@ -308,7 +260,6 @@ class Perceiver:
                 result['nearest_x']      = nearest['x']
                 result['nearest_y']      = nearest['y']
 
-            # Step 5: render annotated frame for dashboard
             result['annotated_frame'] = self._yolo.post_process_render(
                 showFPS = True
             )
@@ -324,10 +275,6 @@ class Perceiver:
         self._yolo = None
         print("  YOLOv8: released")
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  STANDALONE TEST
-# ═════════════════════════════════════════════════════════════════════════════
 
 def main():
     p_cfg = PerceptionConfig()
@@ -386,7 +333,6 @@ def main():
                     f"fps={fps:.0f}"
                 )
 
-                # Print all detections if more than one
                 if n > 1:
                     for d in result['all_detections']:
                         print(f"         → {d['type']:<6} {d['name']:<12} "

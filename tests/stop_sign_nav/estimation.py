@@ -71,62 +71,34 @@ import numpy as np
 from hal.utilities.estimation import EKF
 from pal.utilities.math       import wrap_to_pi
 
-# perception.py lives in the same folder — import SensorManager from it
 from perception import SensorManager, Config as PerceptionConfig
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  PHYSICAL CONSTANTS  —  verified from qcar_config.py
-# ═════════════════════════════════════════════════════════════════════════════
+WHEEL_RADIUS      = 0.066 / 2
+WHEEL_BASE        = 0.256
+PIN_TO_SPUR_RATIO = (13.0 * 19.0) / (70.0 * 37.0)
+ENCODER_CPR       = 720
+ENCODER_PPR       = 4
 
-WHEEL_RADIUS      = 0.066 / 2           # metres   (= 0.033 m)
-WHEEL_BASE        = 0.256               # metres   front-to-rear axle
-PIN_TO_SPUR_RATIO = (13.0 * 19.0) / (70.0 * 37.0)   # = 0.09545...
-ENCODER_CPR       = 720                 # counts per revolution (qcar.py line 140)
-ENCODER_PPR       = 4                   # quadrature pulses per count
-
-# Converts motor shaft counts-per-second → wheel linear speed (m/s)
-# Formula from qcar.py line 149:
-#   CPS_TO_MPS = (1/(CPR*PPR)) * PIN_TO_SPUR * 2*pi * WHEEL_RADIUS
 CPS_TO_MPS = (1.0 / (ENCODER_CPR * ENCODER_PPR)) * PIN_TO_SPUR_RATIO \
              * 2.0 * np.pi * WHEEL_RADIUS
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  EKF CONFIG  —  tune these if drift is too high
-# ═════════════════════════════════════════════════════════════════════════════
-
 class EstimationConfig:
 
-    # Initial pose [x, y, θ]  — car starts at origin, facing +x
     INITIAL_POSE        = np.zeros((3, 1))
-    INITIAL_COVARIANCE  = np.eye(3) * 0.01     # small: we're confident at start
+    INITIAL_COVARIANCE  = np.eye(3) * 0.01
 
-    # Process noise Q — how much we distrust the motion model each tick
-    # Larger = estimator reacts faster to real motion but noisier
-    # Units: [m², m², rad²] per tick
     Q_x     = 0.01
     Q_y     = 0.01
     Q_theta = 0.01
 
-    # Measurement noise R — how much we distrust the encoder speed reading
-    # Only one measurement: wheel speed (m/s)
-    # Larger = estimator trusts encoder less, relies more on model prediction
     R_speed = 0.05
 
-    # Steering angle — QCar 2 has no steering encoder.
-    # We use the last commanded steering angle from the control layer.
-    # In Phase 2 (no driving) this is 0. Phase 3+ will pass the real value.
     DEFAULT_STEERING_RAD = 0.0
 
-    # Gyroscope — used to cross-check heading rate (not in EKF yet, Phase 3+)
-    # Z-axis gyro drift bias (rad/s) — from Phase 1 data: mean ≈ 0.024 rad/s
-    GYRO_BIAS_Z = 0.024   # subtract this before using gyro for heading
+    GYRO_BIAS_Z = 0.024
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  BICYCLE MODEL FUNCTIONS  —  passed to EKF as f and J_f
-# ═════════════════════════════════════════════════════════════════════════════
 
 def bicycle_f(x_hat: np.ndarray, u: list, dt: float) -> np.ndarray:
     """
@@ -150,7 +122,6 @@ def bicycle_f(x_hat: np.ndarray, u: list, dt: float) -> np.ndarray:
     y_new     = y     + v * np.sin(theta) * dt
     theta_new = theta + v * np.tan(delta) / WHEEL_BASE * dt
 
-    # Wrap heading to [-π, π] to prevent unbounded growth
     theta_new = float(wrap_to_pi(theta_new))
 
     return np.array([[x_new], [y_new], [theta_new]])
@@ -173,13 +144,8 @@ def bicycle_J_f(x_hat: np.ndarray, u: list, dt: float) -> np.ndarray:
     F = np.eye(3)
     F[0, 2] = -v * np.sin(theta) * dt
     F[1, 2] = +v * np.cos(theta) * dt
-    # F[2, 2] remains 1 (theta depends on itself, not on x or y)
     return F
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  POSE ESTIMATOR
-# ═════════════════════════════════════════════════════════════════════════════
 
 class PoseEstimator:
     """
@@ -198,7 +164,7 @@ class PoseEstimator:
     def __init__(self, config: EstimationConfig):
         self.cfg  = config
         self._ekf = None
-        self._last_encoder = None   # for delta-encoder speed calculation
+        self._last_encoder = None
         self._last_t       = None
 
     def reset(self, initial_pose: np.ndarray = None):
@@ -213,19 +179,6 @@ class PoseEstimator:
         x0  = initial_pose if initial_pose is not None else cfg.INITIAL_POSE
         x0  = np.array(x0, dtype=float).reshape((3, 1))
 
-        # Measurement model:
-        # We measure wheel speed (m/s) — a linear function of state?
-        # Actually speed is a control input, not a state measurement.
-        # For Phase 2 dead-reckoning we have NO external measurement
-        # corrections (no GPS, no LiDAR yet).
-        #
-        # EKF with only prediction (no correction) is identical to
-        # simple odometry integration — but we keep the EKF structure
-        # so Phase 3+ can add corrections with zero structural changes.
-        #
-        # We use a linear measurement model:  y = C · x + noise
-        # C = identity  (we could "measure" x, y, θ directly from GPS later)
-        # For now we never call .correct() — the EKF just predicts.
 
         self._ekf = EKF(
             x_0 = x0,
@@ -234,7 +187,7 @@ class PoseEstimator:
             R   = np.diagflat([cfg.R_speed, cfg.R_speed, cfg.R_speed]),
             f   = bicycle_f,
             J_f = bicycle_J_f,
-            C   = np.eye(3),    # identity output matrix (for future corrections)
+            C   = np.eye(3),
         )
 
         self._last_encoder = None
@@ -263,22 +216,14 @@ class PoseEstimator:
         ───────
         ndarray (3,)  current pose estimate [x (m), y (m), θ (rad)]
         """
-        # ── Convert encoder counts → wheel speed (m/s) ────────────────────
         v_wheel = self._encoder_to_speed(sensor_data, dt)
 
-        # ── Build control input vector ────────────────────────────────────
-        # u = [wheel_speed (m/s),  steering_angle (rad)]
         u = [v_wheel, steering_rad]
 
-        # ── EKF predict step ──────────────────────────────────────────────
-        # This calls bicycle_f and bicycle_J_f internally.
-        # predict(u, dt) → updates self._ekf.x_hat and self._ekf.P
         if dt > 0:
             self._ekf.predict(u, dt)
 
-        # ── Return flat pose array ────────────────────────────────────────
         pose = self._ekf.x_hat.flatten()
-        # Ensure heading stays in [-π, π] after every step
         pose[2] = float(wrap_to_pi(pose[2]))
         return pose
 
@@ -292,7 +237,6 @@ class PoseEstimator:
         """
         y = np.array(measured_pose, dtype=float).reshape((3, 1))
         self._ekf.correct(y)
-        # Re-wrap heading after correction
         self._ekf.x_hat[2, 0] = float(wrap_to_pi(self._ekf.x_hat[2, 0]))
 
     @property
@@ -312,7 +256,6 @@ class PoseEstimator:
         """Diagonal of P as (3,) — position and heading uncertainty (std dev)."""
         return np.sqrt(np.diag(self._ekf.P))
 
-    # ── PRIVATE ───────────────────────────────────────────────────────────
 
     def _encoder_to_speed(self, sensor_data: dict, dt: float) -> float:
         """
@@ -333,21 +276,15 @@ class PoseEstimator:
         current_counts = sensor_data['motor_encoder']
 
         if self._last_encoder is None or dt <= 0:
-            # First tick — no delta available yet, assume stationary
             self._last_encoder = current_counts
             return 0.0
 
         delta_counts = current_counts - self._last_encoder
         self._last_encoder = current_counts
 
-        # Counts per second → metres per second
         speed_mps = (delta_counts / dt) * CPS_TO_MPS
         return float(speed_mps)
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  DIAGNOSTIC PRINTER
-# ═════════════════════════════════════════════════════════════════════════════
 
 def print_pose_summary(pose: np.ndarray,
                        uncertainty: np.ndarray,
@@ -360,7 +297,6 @@ def print_pose_summary(pose: np.ndarray,
     accel = sensor_data['accelerometer']
     gyro  = sensor_data['gyroscope']
 
-    # Gyro z — corrected for bias
     gyro_z_corrected = gyro[2] - EstimationConfig.GYRO_BIAS_Z
 
     print(
@@ -431,12 +367,7 @@ def print_final_report(pose_history: list, dt_history: list):
         print("\n  Some checks need attention — see above.\n")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  MAIN  —  15-second live test
-# ═════════════════════════════════════════════════════════════════════════════
-
 def main():
-    # Reuse Phase 1 sensor manager — identical interface
     p_cfg   = PerceptionConfig()
     sensors = SensorManager(p_cfg)
     e_cfg   = EstimationConfig()
@@ -468,17 +399,12 @@ def main():
             if elapsed >= TEST_DURATION_S:
                 break
 
-            # ── Read sensors ──────────────────────────────────────────────
             data = sensors.read()
 
-            # ── Compute dt ────────────────────────────────────────────────
             now = time.perf_counter()
             dt  = now - last_t
             last_t = now
 
-            # ── Update pose estimate ──────────────────────────────────────
-            # steering_rad=0.0 because the car is stationary in Phase 2
-            # Phase 3+ replaces this with the real commanded steering angle
             pose = estimator.update(
                 sensor_data  = data,
                 dt           = dt,
@@ -488,7 +414,6 @@ def main():
             pose_history.append(pose.copy())
             dt_history.append(dt)
 
-            # ── Print summary ─────────────────────────────────────────────
             if elapsed - last_print >= PRINT_INTERVAL_S:
                 print_pose_summary(
                     pose        = pose,
@@ -498,7 +423,6 @@ def main():
                 )
                 last_print = elapsed
 
-            # ── Soft real-time pacing ─────────────────────────────────────
             elapsed_tick = time.perf_counter() - tick_start
             sleep_time   = p_cfg.LOOP_DT - elapsed_tick
             if sleep_time > 0:

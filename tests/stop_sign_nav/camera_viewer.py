@@ -38,19 +38,17 @@ import numpy as np
 import cv2
 from flask import Flask, Response, render_template_string, jsonify
 
-# ── Config ───────────────────────────────────────────────────────────────────
 
-CAM_ID      = "2"       # front camera index on this QCar
+CAM_ID      = "2"
 CAM_WIDTH   = 820
 CAM_HEIGHT  = 410
 CAM_FPS     = 30.0
 
 YOLO_WIDTH  = 640
 YOLO_HEIGHT = 480
-CONFIDENCE  = 0.25      # lower = more detections, more false positives
+CONFIDENCE  = 0.25
 FLASK_PORT  = 5000
 
-# ── Shared state ─────────────────────────────────────────────────────────────
 
 _lock         = threading.Lock()
 _jpeg_frame   = b''
@@ -69,7 +67,6 @@ def _get_frame():
     with _lock:
         return _jpeg_frame, list(_detections), _yolo_fps
 
-# ── Flask ─────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 
@@ -190,21 +187,18 @@ def _mjpeg_generator():
     while True:
         jpeg, _, _ = _get_frame()
         if not jpeg:
-            # Placeholder until camera is ready
             blank = np.zeros((YOLO_HEIGHT, YOLO_WIDTH, 3), dtype=np.uint8)
             cv2.putText(blank, 'Waiting for camera...', (140, 240),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 80, 80), 2)
             _, buf = cv2.imencode('.jpg', blank)
             jpeg = buf.tobytes()
 
-        # Only push a new boundary when the frame actually changed
         if jpeg != last_jpeg:
             last_jpeg = jpeg
             yield (boundary + b'\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' +
                    jpeg + b'\r\n')
         else:
-            # Nothing new — sleep briefly instead of busy-spinning
             time.sleep(0.005)
 
 
@@ -225,8 +219,6 @@ def detections():
     return jsonify(fps=f"{fps:.0f}", dets=dets)
 
 
-# ── Camera + YOLO loop ────────────────────────────────────────────────────────
-
 def camera_loop():
     """Opens camera and YOLO, runs detection, updates shared state."""
     global _cam_ok
@@ -234,7 +226,6 @@ def camera_loop():
     from pal.utilities.vision import Camera2D
     from pit.YOLO.nets import YOLOv8
 
-    # COCO type mapping
     PERSON_IDS = {0}
     MOVING_IDS = {1, 2, 3, 16}
 
@@ -257,7 +248,6 @@ def camera_loop():
     print("  YOLO OK")
     _cam_ok = True
 
-    # Flush first frames
     for _ in range(10):
         cam.read()
         time.sleep(0.05)
@@ -270,11 +260,9 @@ def camera_loop():
     while True:
         t0 = time.perf_counter()
 
-        # Read frame
         cam.read()
-        frame_raw = cam.imageData   # (410, 820, 3) uint8
+        frame_raw = cam.imageData
 
-        # YOLO inference
         img  = net.pre_process(frame_raw)
         pred = net.predict(img, classes=None,
                            confidence=CONFIDENCE, verbose=False)
@@ -282,7 +270,6 @@ def camera_loop():
         fps  = float(net.FPS)
         n    = len(pred.boxes.cls)
 
-        # Build detection list for dashboard
         dets = []
         if n > 0:
             net.post_processing(alignedDepth=None)
@@ -305,15 +292,12 @@ def camera_loop():
                         (10, 20), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (100, 100, 100), 1)
 
-        # Encode annotated frame as JPEG
         _, buf = cv2.imencode('.jpg', annotated,
                               [cv2.IMWRITE_JPEG_QUALITY, 80])
         jpeg = buf.tobytes()
 
-        # Push to Flask
         _set_frame(jpeg, dets, fps)
 
-        # Terminal print every 1s
         now = time.perf_counter()
         if now - last_print >= 1.0:
             if dets:
@@ -323,23 +307,18 @@ def camera_loop():
                 print(f"  fps={fps:.0f}  nothing detected — point at an object")
             last_print = now
 
-        # Pace to ~30fps
         elapsed = time.perf_counter() - t0
         sleep   = max(0, 1/30 - elapsed)
         if sleep > 0:
             time.sleep(sleep)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     import socket, logging
 
-    # Suppress Flask request logs
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
 
-    # Find Jetson IP
     try:
         ip = socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -352,17 +331,14 @@ def main():
     print("  Ctrl+C to stop.")
     print("═" * 55 + "\n")
 
-    # Start camera+YOLO in background thread
     cam_thread = threading.Thread(target=camera_loop, daemon=True)
     cam_thread.start()
 
-    # Wait for camera to initialise before starting Flask
     print("  Waiting for camera and YOLO to initialise...")
     while not _cam_ok:
         time.sleep(0.1)
     print("  Ready.\n")
 
-    # Run Flask (blocking — Ctrl+C stops everything)
     app.run(host='0.0.0.0', port=FLASK_PORT, threaded=True)
 
 

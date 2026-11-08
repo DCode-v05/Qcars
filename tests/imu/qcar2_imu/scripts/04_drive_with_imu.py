@@ -8,9 +8,8 @@ from core.imu_fusion import MadgwickFilter
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config.imu_config import SAMPLE_RATE_HZ, DT, STEER_MAX, STEER_MIN
 
-# ── Tune these ─────────────────────────────────────────────
-THROTTLE = 0.05    # 5% — start safe
-RUN_TIME = 5.0     # seconds
+THROTTLE = 0.05
+RUN_TIME = 5.0
 KP       = 0.04
 KI       = 0.001
 KD       = 0.008
@@ -36,7 +35,7 @@ class HeadingPID:
 def main():
     pid  = HeadingPID(KP, KI, KD)
     filt = MadgwickFilter(sample_rate_hz=SAMPLE_RATE_HZ, beta=0.05)
-    LEDs = np.array([0, 0, 0, 0, 0, 0, 1, 1])  # headlights on
+    LEDs = np.array([0, 0, 0, 0, 0, 0, 1, 1])
 
     print("=" * 50)
     print(" QCar2 - IMU Heading-Hold Drive (PAL)")
@@ -46,7 +45,6 @@ def main():
 
     with QCar(readMode=0, frequency=SAMPLE_RATE_HZ) as car:
         try:
-            # ── Phase 1: Warmup ────────────────────────────────
             print(f"\n[1/3] Warmup {WARMUP_S}s — keep car still...")
             t_next = time.monotonic()
             t_end  = t_next + WARMUP_S
@@ -65,7 +63,6 @@ def main():
             ang = filt.get_euler_angles()
             print(f"    Initial yaw: {ang['yaw_deg']:+.2f} deg")
 
-            # ── Phase 2: Drive ─────────────────────────────────
             print(f"[2/3] Driving {RUN_TIME}s...")
             t_start = time.monotonic()
             t_next  = t_start
@@ -99,7 +96,6 @@ def main():
             print("\n\nEmergency stop.")
 
         finally:
-            # QCar __exit__ calls terminate() which zeroes motors
             print("\n[3/3] Stopping motors...")
 
 

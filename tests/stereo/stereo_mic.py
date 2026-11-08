@@ -2,10 +2,10 @@ import sounddevice as sd
 import numpy as np
 import scipy.io.wavfile as wav
 
-DEVICE      = 4        # QCar 2 stereo mic
+DEVICE      = 4
 SAMPLERATE  = 48000
 CHANNELS    = 2
-DURATION    = 5        # seconds
+DURATION    = 5
 OUTPUT_FILE = "stereo_output.wav"
 
 print(f"Recording {DURATION} seconds... make some noise!")

@@ -14,15 +14,12 @@ from config.imu_config import (
 
 @dataclass
 class IMUData:
-    # Gyroscope (rad/s)
     gyro_x: float
     gyro_y: float
     gyro_z: float
-    # Accelerometer (m/s²)
     accel_x: float
     accel_y: float
     accel_z: float
-    # Magnetometer (Tesla)
     mag_x: float
     mag_y: float
     mag_z: float

@@ -17,7 +17,7 @@ class Localizer:
     def __init__(self):
         self.x     = 0.0
         self.y     = 0.0
-        self.theta = 0.0  # heading in radians, 0 = initial forward
+        self.theta = 0.0
         self._prev_speed = 0.0
 
     def reset(self):
@@ -39,21 +39,17 @@ class Localizer:
         if dt <= 0:
             return self.pose
 
-        # Speed from motor tachometer
         motor_speed = sensor_data.get('motor_speed', 0.0)
         v = abs(motor_speed) * cfg.TACH_TO_MPS * throttle_sign
 
-        # Yaw rate from gyroscope (z-axis), remove bias
         gyro = sensor_data.get('gyroscope')
         if gyro is not None:
             yaw_rate = float(gyro[2]) - cfg.GYRO_BIAS_Z
         else:
             yaw_rate = 0.0
 
-        # Integrate heading
         self.theta += yaw_rate * dt
 
-        # Integrate position (mid-point method for better accuracy)
         self.x += v * math.cos(self.theta) * dt
         self.y += v * math.sin(self.theta) * dt
 
